@@ -11,6 +11,10 @@
 <meta name="apple-mobile-web-app-title" content="Kegelabend">
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icon-192.png">
+<!-- Cloud-Funktionen (Konten, Clubs) laufen über Supabase. Lädt nur, wenn online.
+     WICHTIG: kein "defer" hier - das App-Skript weiter unten braucht
+     window.supabase bereits beim ersten Ausführen, nicht erst danach. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#F3EAD3;
@@ -366,6 +370,103 @@
     background:var(--surface);
     color:var(--text);
   }
+
+  /* ---------- Cloud / Club styles ---------- */
+  .badge{
+    display:inline-block;
+    font-size:.68rem;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.03em;
+    padding:3px 8px;
+    border-radius:999px;
+    background:var(--accent);
+    color:var(--dark);
+    margin-left:6px;
+    vertical-align:middle;
+  }
+  .badge.outline{background:transparent;border:1.5px solid var(--wood);color:var(--wood);}
+  .badge.adminbadge{background:var(--alert);color:#fff;}
+
+  .setup-notice{
+    background:var(--surface);
+    border:2px dashed var(--wood);
+    border-radius:var(--radius);
+    padding:18px;
+    font-size:.88rem;
+    line-height:1.5;
+    color:var(--text);
+  }
+  .setup-notice code{
+    background:rgba(91,58,41,.1);
+    padding:1px 5px;
+    border-radius:5px;
+    font-family:var(--font-mono);
+    font-size:.82rem;
+  }
+
+  .segmented{
+    display:flex;
+    background:rgba(91,58,41,.08);
+    border-radius:12px;
+    padding:4px;
+    margin-bottom:16px;
+    gap:4px;
+  }
+  .segmented button{
+    flex:1;
+    background:none;
+    padding:8px 4px;
+    border-radius:9px;
+    font-size:.82rem;
+    font-weight:700;
+    color:var(--wood);
+  }
+  .segmented button.active{background:var(--surface);color:var(--dark);box-shadow:var(--shadow);}
+
+  .club-switcher{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-bottom:14px;
+  }
+  .club-switcher select{
+    flex:1;
+    padding:9px 10px;
+    border-radius:10px;
+    border:1.5px solid rgba(91,58,41,.3);
+    background:var(--surface);
+    font-family:inherit;
+    font-size:.9rem;
+    color:var(--text);
+  }
+
+  .star-rating{display:inline-flex;gap:2px;}
+  .star-rating button{
+    background:none;font-size:1.2rem;line-height:1;
+    color:rgba(91,58,41,.25);padding:2px;
+  }
+  .star-rating button.filled{color:var(--accent-dark);}
+
+  .official-tag{
+    display:flex;align-items:center;justify-content:space-between;
+    gap:8px;
+  }
+
+  .link-btn{
+    background:none;color:var(--dark);font-weight:700;
+    text-decoration:underline;font-size:.85rem;padding:4px 0;
+  }
+
+  .auth-tabs{display:flex;gap:8px;margin-bottom:16px;}
+  .auth-tabs button{
+    flex:1;padding:9px;border-radius:10px;
+    border:2px solid var(--dark);background:transparent;color:var(--dark);font-weight:700;
+  }
+  .auth-tabs button.active{background:var(--dark);color:var(--bg);}
+
+  .rsvp-readonly{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:.88rem;}
+  .rsvp-readonly .rstatus{font-size:1rem;}
 </style>
 </head>
 <body>
@@ -377,17 +478,16 @@
   </header>
 
   <main>
-    <section id="view-events" class="view active"></section>
     <section id="view-games" class="view"></section>
-    <section id="view-friends" class="view"></section>
+    <section id="view-club" class="view active"></section>
+    <section id="view-admin" class="view"></section>
   </main>
 
   <button class="fab" id="fab" aria-label="Neu anlegen">+</button>
 
-  <nav class="tabbar">
-    <button data-tab="events" class="active"><span class="icon">🎳</span>Abende</button>
+  <nav class="tabbar" id="tabbar">
+    <button data-tab="club" class="active"><span class="icon">🏛️</span>Club</button>
     <button data-tab="games"><span class="icon">📋</span>Spiele</button>
-    <button data-tab="friends"><span class="icon">👥</span>Freunde</button>
   </nav>
 </div>
 
@@ -402,7 +502,7 @@
 "use strict";
 
 /* ---------- Storage layer ---------- */
-const K = { games:'kegel_games_v1', friends:'kegel_friends_v1', events:'kegel_events_v1' };
+const K = { games:'kegel_games_v1' };
 let memoryStore = {};
 function testStorage(){
   try{ const t='__t__'; localStorage.setItem(t,'1'); localStorage.removeItem(t); return true; }
@@ -476,9 +576,7 @@ function seedGames(){
 /* ---------- State ---------- */
 const state = {
   games: loadData(K.games, null),
-  friends: loadData(K.friends, []),
-  events: loadData(K.events, []),
-  tab: 'events'
+  tab: 'club'
 };
 if(state.games === null){
   state.games = seedGames();
@@ -486,64 +584,249 @@ if(state.games === null){
 }
 
 function persistGames(){ saveData(K.games, state.games); }
-function persistFriends(){ saveData(K.friends, state.friends); }
-function persistEvents(){ saveData(K.events, state.events); }
+
+/* =========================================================
+   CLOUD / SUPABASE (Konten & Clubs)
+   =========================================================
+   Trage hier deine eigenen Supabase-Zugangsdaten ein (Project
+   Settings -> API in deinem Supabase-Dashboard). Ohne diese
+   Angaben funktioniert die App weiterhin normal im Solo-Modus –
+   der Club-Tab zeigt dann nur einen Einrichtungshinweis. */
+const SUPABASE_URL = 'https://jaiemxlsukjskeouuekc.supabase.co';        // z.B. 'https://xxxxxxxx.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImphaWVteGxzdWtqc2tlb3V1ZWtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NzQ4MDksImV4cCI6MjA5OTI1MDgwOX0.u3O1wfnI0g9a8ajfOZI3AHz1g8EtWxdWjact4i7tf5g';   // der "anon public" Key aus Supabase
+
+let sb = null;
+if(SUPABASE_URL && SUPABASE_ANON_KEY && typeof window.supabase !== 'undefined'){
+  try{ sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }
+  catch(e){ sb = null; }
+}
+const cloudEnabled = !!sb;
+
+const cloud = {
+  session: null,
+  profile: null,          // { id, display_name, is_admin }
+  myClubs: [],             // [{id, name, invite_code, role}]
+  activeClubId: loadData('kegel_active_club', null),
+  members: [],             // Mitglieder des aktiven Clubs
+  events: [],               // Kegelabende des aktiven Clubs
+  rsvps: [],                 // alle RSVPs des aktiven Clubs (über alle Events)
+  ratings: {},               // { game_id: {stars, updated_by} } für aktiven Club
+  clubTab: 'events'          // Unter-Tab innerhalb "Club": events | games | members
+};
+let officialGames = loadData('kegel_official_games_v1', []);
+let realtimeChannel = null;
+
+function isLoggedIn(){ return !!(cloud.session && cloud.session.user); }
+function isAdmin(){ return !!(cloud.profile && cloud.profile.is_admin); }
+function activeClub(){ return cloud.myClubs.find(c => c.id === cloud.activeClubId) || null; }
+
+/* ---------- Einweg-Sync: offizielle Spiele lesen (kein Login nötig) ---------- */
+async function refreshOfficialGames(){
+  if(!cloudEnabled) return;
+  try{
+    const { data, error } = await sb.from('games').select('*').order('name', { ascending: true });
+    if(error) throw error;
+    officialGames = (data||[]).map(g => ({
+      id: g.id, icon: g.icon, name: g.name, beschreibung: g.beschreibung,
+      minSpieler: g.min_spieler, maxSpieler: g.max_spieler, dauer: g.dauer
+    }));
+    saveData('kegel_official_games_v1', officialGames);
+    if(state.tab==='games') renderGames();
+  }catch(e){ /* offline oder Cloud nicht erreichbar - lokaler Stand bleibt gültig */ }
+}
+
+/* ---------- Auth ---------- */
+async function signUp(email, password, displayName){
+  const { data, error } = await sb.auth.signUp({
+    email, password,
+    options: { data: { display_name: displayName } }
+  });
+  if(error) throw error;
+  return data;
+}
+async function signIn(email, password){
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if(error) throw error;
+  return data;
+}
+async function signOut(){
+  await sb.auth.signOut();
+  cloud.session = null; cloud.profile = null; cloud.myClubs = []; cloud.activeClubId = null;
+  cloud.members = []; cloud.events = []; cloud.ratings = {};
+  saveData('kegel_active_club', null);
+  teardownRealtime();
+}
+async function loadProfile(){
+  if(!isLoggedIn()) return;
+  const { data, error } = await sb.from('profiles').select('*').eq('id', cloud.session.user.id).single();
+  if(!error) cloud.profile = data;
+}
+
+/* ---------- Clubs ---------- */
+function genInviteCode(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for(let i=0;i<6;i++) out += chars[Math.floor(Math.random()*chars.length)];
+  return out;
+}
+async function createClub(name){
+  let lastErr = null;
+  for(let attempt=0; attempt<5; attempt++){
+    const code = genInviteCode();
+    const { data, error } = await sb.from('clubs')
+      .insert({ name, invite_code: code, owner_id: cloud.session.user.id })
+      .select().single();
+    if(!error){
+      await sb.from('club_members').insert({ club_id: data.id, user_id: cloud.session.user.id, role: 'owner' });
+      await loadMyClubs();
+      cloud.activeClubId = data.id;
+      saveData('kegel_active_club', data.id);
+      return data;
+    }
+    lastErr = error;
+    if(error.code !== '23505') break; // nur bei Code-Kollision erneut versuchen
+  }
+  throw lastErr;
+}
+async function joinClubByCode(code){
+  const { data, error } = await sb.rpc('join_club_by_code', { code: code.trim().toUpperCase() });
+  if(error) throw error;
+  await loadMyClubs();
+  cloud.activeClubId = data.id;
+  saveData('kegel_active_club', data.id);
+  return data;
+}
+async function loadMyClubs(){
+  if(!isLoggedIn()) return;
+  const { data, error } = await sb
+    .from('club_members')
+    .select('role, clubs ( id, name, invite_code, owner_id )')
+    .eq('user_id', cloud.session.user.id);
+  if(error){ cloud.myClubs = []; return; }
+  cloud.myClubs = (data||[]).map(row => ({
+    id: row.clubs.id, name: row.clubs.name, invite_code: row.clubs.invite_code,
+    owner_id: row.clubs.owner_id, role: row.role
+  }));
+  if(cloud.activeClubId && !cloud.myClubs.find(c=>c.id===cloud.activeClubId)){
+    cloud.activeClubId = cloud.myClubs[0] ? cloud.myClubs[0].id : null;
+    saveData('kegel_active_club', cloud.activeClubId);
+  }
+  if(!cloud.activeClubId && cloud.myClubs[0]){
+    cloud.activeClubId = cloud.myClubs[0].id;
+    saveData('kegel_active_club', cloud.activeClubId);
+  }
+}
+async function leaveClub(clubId){
+  await sb.from('club_members').delete().eq('club_id', clubId).eq('user_id', cloud.session.user.id);
+  await loadMyClubs();
+  await loadActiveClubData();
+}
+
+/* ---------- Club-Daten laden ---------- */
+async function loadActiveClubData(){
+  teardownRealtime();
+  const clubId = cloud.activeClubId;
+  if(!clubId){ cloud.members=[]; cloud.events=[]; cloud.rsvps=[]; cloud.ratings={}; return; }
+
+  const [membersRes, eventsRes, ratingsRes, rsvpRes] = await Promise.all([
+    sb.from('club_members').select('user_id, role, profiles ( display_name )').eq('club_id', clubId),
+    sb.from('club_events').select('*').eq('club_id', clubId).order('datum', { ascending: true }),
+    sb.from('club_game_ratings').select('*').eq('club_id', clubId),
+    sb.from('club_event_rsvp').select('*').eq('club_id', clubId)
+  ]);
+  cloud.members = membersRes.error ? [] : membersRes.data;
+  cloud.events = eventsRes.error ? [] : eventsRes.data;
+  cloud.rsvps = rsvpRes.error ? [] : rsvpRes.data;
+  cloud.ratings = {};
+  if(!ratingsRes.error){
+    ratingsRes.data.forEach(r => { cloud.ratings[r.game_id] = r; });
+  }
+  setupRealtime(clubId);
+}
+
+function teardownRealtime(){
+  if(realtimeChannel){ sb.removeChannel(realtimeChannel); realtimeChannel = null; }
+}
+function setupRealtime(clubId){
+  if(!cloudEnabled) return;
+  realtimeChannel = sb.channel('club-'+clubId)
+    .on('postgres_changes', { event:'*', schema:'public', table:'club_events', filter:'club_id=eq.'+clubId }, async () => {
+      const { data } = await sb.from('club_events').select('*').eq('club_id', clubId).order('datum', { ascending:true });
+      cloud.events = data || [];
+      if(state.tab==='club') renderClub();
+    })
+    .on('postgres_changes', { event:'*', schema:'public', table:'club_event_rsvp', filter:'club_id=eq.'+clubId }, async () => {
+      const { data } = await sb.from('club_event_rsvp').select('*').eq('club_id', clubId);
+      cloud.rsvps = data || [];
+      if(state.tab==='club') renderClub();
+      refreshOpenEventRsvpIfAny();
+    })
+    .on('postgres_changes', { event:'*', schema:'public', table:'club_game_ratings', filter:'club_id=eq.'+clubId }, async () => {
+      const { data } = await sb.from('club_game_ratings').select('*').eq('club_id', clubId);
+      cloud.ratings = {};
+      (data||[]).forEach(r => { cloud.ratings[r.game_id] = r; });
+      if(state.tab==='club') renderClub();
+    })
+    .on('postgres_changes', { event:'*', schema:'public', table:'club_members', filter:'club_id=eq.'+clubId }, async () => {
+      const { data } = await sb.from('club_members').select('user_id, role, profiles ( display_name )').eq('club_id', clubId);
+      cloud.members = data || [];
+      if(state.tab==='club') renderClub();
+    })
+    .subscribe();
+}
+// Platzhalter, wird weiter unten (Event-Detail-Modal) mit echter Funktion belegt,
+// damit ein offenes Modal die RSVP-Liste live nachziehen kann.
+let refreshOpenEventRsvpIfAny = function(){};
+
+/* ---------- Supabase-Session verdrahten ---------- */
+async function initCloud(){
+  if(!cloudEnabled) return;
+  const { data } = await sb.auth.getSession();
+  cloud.session = data.session;
+  if(isLoggedIn()){
+    await loadProfile();
+    await loadMyClubs();
+    await loadActiveClubData();
+  }
+  sb.auth.onAuthStateChange(async (event, session) => {
+    cloud.session = session;
+    if(isLoggedIn()){
+      await loadProfile();
+      await loadMyClubs();
+      await loadActiveClubData();
+    } else {
+      cloud.profile = null; cloud.myClubs = []; cloud.members=[]; cloud.events=[]; cloud.ratings={};
+      teardownRealtime();
+    }
+    renderNavForRole();
+    if(state.tab==='club' || state.tab==='admin') renderAll();
+  });
+  renderNavForRole();
+  refreshOfficialGames();
+}
+function renderNavForRole(){
+  const tabbar = document.getElementById('tabbar');
+  let adminBtn = tabbar.querySelector('[data-tab="admin"]');
+  if(isAdmin() && !adminBtn){
+    adminBtn = document.createElement('button');
+    adminBtn.dataset.tab = 'admin';
+    adminBtn.innerHTML = '<span class="icon">🛠️</span>Admin';
+    adminBtn.addEventListener('click', () => setTab('admin'));
+    tabbar.appendChild(adminBtn);
+  } else if(!isAdmin() && adminBtn){
+    adminBtn.remove();
+    if(state.tab==='admin') setTab('events');
+  }
+}
 
 /* ---------- Emoji options ---------- */
 const GAME_EMOJIS = ['🎳','🍺','🏆','🎯','🔥','🎲','⭐','🥨','🙈','🍀'];
 
 /* =========================================================
-   RENDER: EVENTS
+   Hilfsfunktion: leerer Zustand (von mehreren Tabs genutzt)
    ========================================================= */
-function eventDateTime(ev){
-  return new Date((ev.datum||'2100-01-01') + 'T' + (ev.uhrzeit||'00:00'));
-}
-function renderEvents(){
-  const el = document.getElementById('view-events');
-  const now = new Date();
-  const upcoming = state.events.filter(e => eventDateTime(e) >= now).sort((a,b)=> eventDateTime(a)-eventDateTime(b));
-  const past = state.events.filter(e => eventDateTime(e) < now).sort((a,b)=> eventDateTime(b)-eventDateTime(a));
-
-  const nextEv = upcoming[0];
-  document.getElementById('subtitle').textContent = nextEv
-    ? 'Nächster Abend: ' + formatDateHuman(nextEv.datum) + ' · ' + (nextEv.uhrzeit||'')
-    : 'Noch nichts geplant';
-
-  let html = '';
-  if(state.events.length === 0){
-    html += emptyState('🎳', 'Noch kein Kegelabend geplant.', 'Leg direkt los und plane den nächsten Abend mit deiner Truppe.');
-  } else {
-    html += '<h2 class="section-title">Kommende Abende</h2>';
-    html += upcoming.length
-      ? upcoming.map(ev => eventCard(ev,false)).join('')
-      : '<p style="color:var(--text-muted);font-size:.9rem;">Aktuell nichts geplant – leg einen neuen Abend an.</p>';
-    if(past.length){
-      html += '<h2 class="section-title">Vergangene Abende</h2>';
-      html += past.map(ev => eventCard(ev,true)).join('');
-    }
-  }
-  html += '<div class="card dashed" id="add-event-card">+ Neuer Kegelabend</div>';
-  el.innerHTML = html;
-
-  $all('.event-card', el).forEach(c => c.addEventListener('click', () => openEventModal(c.dataset.id)));
-  const addCard = document.getElementById('add-event-card');
-  if(addCard) addCard.addEventListener('click', () => openEventModal(null));
-}
 function emptyState(emoji, title, sub){
   return '<div class="empty-state"><span class="emoji">'+emoji+'</span><p><strong>'+esc(title)+'</strong><br>'+esc(sub)+'</p></div>';
-}
-function eventCard(ev, isPast){
-  const zugesagt = (ev.teilnehmer||[]).filter(t=>t.status==='zugesagt').length;
-  const offen = (ev.teilnehmer||[]).filter(t=>t.status==='offen').length;
-  const spieleCount = (ev.spiele||[]).length;
-  const stamp = isPast ? '✔️' : '🎳';
-  return '<div class="card event-card '+(isPast?'past':'')+'" data-id="'+ev.id+'" tabindex="0">'
-    + '<div class="stamp">'+stamp+'</div>'
-    + '<h3>'+esc(ev.titel || ('Kegelabend am ' + formatDateHuman(ev.datum)))+'</h3>'
-    + '<div class="meta-row">📅 '+formatDateHuman(ev.datum)+' · '+esc(ev.uhrzeit||'--:--')+'</div>'
-    + '<div class="meta-row">📍 '+esc(ev.ort || 'Ort offen')+'</div>'
-    + '<div class="meta-row">👥 '+zugesagt+' zugesagt'+(offen?(' · '+offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
-    + '</div>';
 }
 
 /* =========================================================
@@ -551,51 +834,36 @@ function eventCard(ev, isPast){
    ========================================================= */
 function renderGames(){
   const el = document.getElementById('view-games');
-  let html = '<h2 class="section-title">Spiele-Bestand</h2>';
+  let html = '';
+
+  if(officialGames.length){
+    html += '<h2 class="section-title">⭐ Offizielle Spiele</h2>';
+    html += '<p style="font-size:.82rem;color:var(--text-muted);margin:-6px 0 10px;">Zentral gepflegt, automatisch synchronisiert – nur lesbar.</p>';
+    html += officialGames.map(g => gameCard(g, true)).join('');
+  } else if(cloudEnabled){
+    html += '<p style="font-size:.82rem;color:var(--text-muted);">⭐ Offizielle Spiele werden geladen, sobald du online bist...</p>';
+  }
+
+  html += '<h2 class="section-title">Eigener Spiele-Bestand</h2>';
   if(state.games.length === 0){
-    html += emptyState('📋','Kein Spiel im Bestand.','Leg dein erstes Kegel-Spiel an.');
+    html += emptyState('📋','Kein eigenes Spiel im Bestand.','Leg dein erstes Kegel-Spiel an.');
   } else {
-    html += state.games.map(g => gameCard(g)).join('');
+    html += state.games.map(g => gameCard(g, false)).join('');
   }
   html += '<div class="card dashed" id="add-game-card">+ Neues Spiel</div>';
   el.innerHTML = html;
 
-  $all('.game-card', el).forEach(c => c.addEventListener('click', () => openGameModal(c.dataset.id)));
+  $all('.game-card:not(.official)', el).forEach(c => c.addEventListener('click', () => openGameModal(c.dataset.id)));
   const addCard = document.getElementById('add-game-card');
   if(addCard) addCard.addEventListener('click', () => openGameModal(null));
 }
-function gameCard(g){
-  return '<div class="card game-card" data-id="'+g.id+'" tabindex="0">'
+function gameCard(g, isOfficial){
+  return '<div class="card game-card '+(isOfficial?'official':'')+'" data-id="'+g.id+'" tabindex="0" style="'+(isOfficial?'cursor:default;':'')+'">'
     + '<div class="stamp">'+esc(g.icon||'🎳')+'</div>'
-    + '<h3>'+esc(g.name)+'</h3>'
+    + '<h3>'+esc(g.name)+(isOfficial?'<span class="badge">Offiziell</span>':'')+'</h3>'
     + (g.beschreibung ? '<p style="margin:4px 0;font-size:.88rem;color:var(--text-muted);">'+esc(g.beschreibung)+'</p>' : '')
     + '<div class="meta-row">👥 '+g.minSpieler+'–'+g.maxSpieler+' Spieler · ⏱ ca. '+g.dauer+' Min.</div>'
     + '</div>';
-}
-
-/* =========================================================
-   RENDER: FRIENDS
-   ========================================================= */
-function renderFriends(){
-  const el = document.getElementById('view-friends');
-  let html = '<h2 class="section-title">Freunde</h2>';
-  if(state.friends.length === 0){
-    html += emptyState('👥','Noch keine Kegelbrüder & -schwestern eingetragen.','Füg deine Truppe hinzu, dann geht die Einladung beim nächsten Abend blitzschnell.');
-  } else {
-    html += '<div class="card" style="cursor:default;">' + state.friends.map(f =>
-      '<div class="friend-row" data-id="'+f.id+'" style="cursor:pointer;">'
-      + '<div class="avatar" style="background:'+nameToColor(f.name)+';">'+esc(initials(f.name))+'</div>'
-      + '<div class="fname">'+esc(f.name)+'</div>'
-      + '<div style="color:var(--text-muted);font-size:1rem;">›</div>'
-      + '</div>'
-    ).join('') + '</div>';
-  }
-  html += '<div class="card dashed" id="add-friend-card">+ Freund hinzufügen</div>';
-  el.innerHTML = html;
-
-  $all('.friend-row', el).forEach(r => r.addEventListener('click', () => openFriendModal(r.dataset.id)));
-  const addCard = document.getElementById('add-friend-card');
-  if(addCard) addCard.addEventListener('click', () => openFriendModal(null));
 }
 
 /* =========================================================
@@ -682,266 +950,452 @@ function openGameModal(id){
 }
 
 /* =========================================================
-   MODAL: Friend form
+   RENDER: CLUB (Auth, Club-Verwaltung, Club-Dashboard)
    ========================================================= */
-function openFriendModal(id){
-  const friend = id ? state.friends.find(f=>f.id===id) : null;
-  openModal(
-    '<h2>'+(friend?'Freund bearbeiten':'Freund hinzufügen')+'</h2>'
-    + '<div class="field"><label>Name</label><input type="text" id="f-name" value="'+(friend?esc(friend.name):'')+'" placeholder="Vorname"></div>'
-    + '<div class="modal-actions">'
-      + '<button class="btn btn-primary" id="f-save">Speichern</button>'
-      + (friend ? '<button class="btn btn-alert" id="f-delete">Löschen</button>' : '')
-    + '</div>'
-  );
-  document.getElementById('f-save').addEventListener('click', () => {
-    const name = document.getElementById('f-name').value.trim();
-    if(!name){ showToast('Bitte einen Namen eintragen.'); return; }
-    if(friend){
-      friend.name = name;
-    } else {
-      state.friends.push({ id:uid(), name });
-    }
-    persistFriends();
-    renderFriends();
-    closeModal();
-    showToast('Gespeichert 👍');
-  });
-  const delBtn = document.getElementById('f-delete');
-  if(delBtn) delBtn.addEventListener('click', () => {
-    state.friends = state.friends.filter(f=>f.id!==friend.id);
-    // auch aus allen Events entfernen
-    state.events.forEach(ev => { ev.teilnehmer = (ev.teilnehmer||[]).filter(t=>t.friendId!==friend.id); });
-    persistFriends();
-    persistEvents();
-    renderFriends();
-    closeModal();
-    showToast('Freund entfernt');
-  });
+let authState = { mode: 'login' };
+
+function rsvpCounts(eventId){
+  const rows = cloud.rsvps.filter(r => r.event_id === eventId);
+  return {
+    zugesagt: rows.filter(r=>r.status==='zugesagt').length,
+    offen: rows.filter(r=>r.status==='offen').length,
+    abgesagt: rows.filter(r=>r.status==='abgesagt').length
+  };
 }
 
-/* =========================================================
-   MODAL: Event form (Planung des Abends)
-   ========================================================= */
-function openEventModal(id){
-  const ev = id ? state.events.find(e=>e.id===id) : null;
-  // Arbeitskopie für Teilnehmer/Spiele-Auswahl
-  const work = {
-    teilnehmer: ev ? JSON.parse(JSON.stringify(ev.teilnehmer||[])) : [],
-    spiele: ev ? [...(ev.spiele||[])] : []
-  };
+function renderClub(){
+  const el = document.getElementById('view-club');
+  if(!cloudEnabled){
+    document.getElementById('subtitle').textContent = 'Kegelabende mit deinem Club planen';
+    el.innerHTML = '<h2 class="section-title">Club</h2>'
+      + '<div class="setup-notice">☁️ Cloud-Funktionen sind noch nicht eingerichtet.<br><br>'
+      + 'Führe dazu <code>supabase-schema.sql</code> in deinem Supabase-Projekt aus (SQL Editor) und trage anschließend deine <code>SUPABASE_URL</code> und <code>SUPABASE_ANON_KEY</code> im Code dieser Datei ein.</div>';
+    return;
+  }
+  if(!isLoggedIn()){
+    document.getElementById('subtitle').textContent = 'Melde dich an, um deinen Club zu sehen';
+    el.innerHTML = '<h2 class="section-title">Anmelden</h2>'
+      + '<div class="auth-tabs">'
+        + '<button data-authtab="login" class="'+(authState.mode==='login'?'active':'')+'">Login</button>'
+        + '<button data-authtab="register" class="'+(authState.mode==='register'?'active':'')+'">Registrieren</button>'
+      + '</div>'
+      + (authState.mode==='register' ? '<div class="field"><label>Anzeigename</label><input type="text" id="auth-name" placeholder="Wie dich andere im Club sehen"></div>' : '')
+      + '<div class="field"><label>E-Mail</label><input type="text" id="auth-email" autocomplete="email"></div>'
+      + '<div class="field"><label>Passwort</label><input type="password" id="auth-pw" autocomplete="'+(authState.mode==='register'?'new-password':'current-password')+'"></div>'
+      + '<button class="btn btn-primary btn-block" id="auth-submit">'+(authState.mode==='register'?'Registrieren':'Einloggen')+'</button>'
+      + '<p id="auth-msg" style="font-size:.85rem;margin-top:10px;"></p>';
+    $all('[data-authtab]', el).forEach(b => b.addEventListener('click', () => { authState.mode = b.dataset.authtab; renderClub(); }));
+    document.getElementById('auth-submit').addEventListener('click', async () => {
+      const email = document.getElementById('auth-email').value.trim();
+      const pw = document.getElementById('auth-pw').value;
+      const msg = document.getElementById('auth-msg');
+      msg.textContent = '';
+      if(!email || !pw){ msg.style.color='var(--alert)'; msg.textContent = 'Bitte E-Mail und Passwort eingeben.'; return; }
+      try{
+        if(authState.mode==='register'){
+          const name = (document.getElementById('auth-name').value||'').trim() || email.split('@')[0];
+          await signUp(email, pw, name);
+          msg.style.color = 'var(--ok)';
+          msg.textContent = 'Fast geschafft! Bitte bestätige deine E-Mail-Adresse über den Link, den wir dir geschickt haben.';
+        } else {
+          await signIn(email, pw);
+          showToast('Eingeloggt 👋');
+        }
+      }catch(e){ msg.style.color='var(--alert)'; msg.textContent = e.message || 'Etwas ist schiefgelaufen.'; }
+    });
+    return;
+  }
+  if(cloud.myClubs.length === 0){
+    document.getElementById('subtitle').textContent = 'Gründe deinen ersten Kegelclub';
+    el.innerHTML = '<h2 class="section-title">Willkommen'+(cloud.profile?', '+esc(cloud.profile.display_name):'')+'!</h2>'
+      + '<div class="card" style="cursor:default;"><h3>Club erstellen</h3>'
+        + '<div class="field"><input type="text" id="new-club-name" placeholder="z.B. Kegelfreunde Köln"></div>'
+        + '<button class="btn btn-primary btn-block" id="create-club-btn">Club erstellen</button></div>'
+      + '<div class="card" style="cursor:default;"><h3>Club beitreten</h3>'
+        + '<div class="field"><input type="text" id="join-club-code" placeholder="z.B. AB12CD" style="text-transform:uppercase;"></div>'
+        + '<button class="btn btn-outline btn-block" id="join-club-btn">Beitreten</button></div>'
+      + '<button class="link-btn" id="logout-btn">Abmelden</button>';
+    document.getElementById('create-club-btn').addEventListener('click', async () => {
+      const name = document.getElementById('new-club-name').value.trim();
+      if(!name){ showToast('Bitte einen Namen eingeben.'); return; }
+      try{ await createClub(name); await loadActiveClubData(); renderClub(); showToast('Club erstellt 🏛️'); }
+      catch(e){ showToast('Fehler: '+(e.message||'unbekannt')); }
+    });
+    document.getElementById('join-club-btn').addEventListener('click', async () => {
+      const code = document.getElementById('join-club-code').value.trim();
+      if(!code){ showToast('Bitte einen Code eingeben.'); return; }
+      try{ await joinClubByCode(code); await loadActiveClubData(); renderClub(); showToast('Club beigetreten 🎉'); }
+      catch(e){ showToast('Fehler: '+(e.message||'Ungültiger Code')); }
+    });
+    document.getElementById('logout-btn').addEventListener('click', async () => { await signOut(); renderClub(); });
+    return;
+  }
 
-  function friendStatus(friendId){
-    const t = work.teilnehmer.find(t=>t.friendId===friendId);
-    return t ? t.status : null;
-  }
-  function toggleFriend(friendId){
-    const idx = work.teilnehmer.findIndex(t=>t.friendId===friendId);
-    if(idx>=0){ work.teilnehmer.splice(idx,1); }
-    else { work.teilnehmer.push({friendId, status:'offen'}); }
-  }
-  function setStatus(friendId, status){
-    const t = work.teilnehmer.find(t=>t.friendId===friendId);
-    if(t) t.status = status;
-  }
-  function toggleGame(gameId){
-    const idx = work.spiele.indexOf(gameId);
-    if(idx>=0) work.spiele.splice(idx,1);
-    else work.spiele.push(gameId);
-  }
-  function moveGame(gameId, dir){
-    const idx = work.spiele.indexOf(gameId);
-    const newIdx = idx+dir;
-    if(newIdx<0 || newIdx>=work.spiele.length) return;
-    [work.spiele[idx], work.spiele[newIdx]] = [work.spiele[newIdx], work.spiele[idx]];
-  }
+  const club = activeClub();
+  if(!club){ el.innerHTML = '<p>Lade Club...</p>'; return; }
 
-  function friendsBlockHtml(){
-    if(state.friends.length===0){
-      return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Freunde eingetragen. Wechsle kurz zum Tab "Freunde" und leg sie an.</p>';
+  const now = new Date();
+  const upcomingEvents = cloud.events
+    .filter(ev => new Date(ev.datum + 'T' + (ev.uhrzeit||'00:00')) >= now)
+    .sort((a,b) => new Date(a.datum+'T'+(a.uhrzeit||'00:00')) - new Date(b.datum+'T'+(b.uhrzeit||'00:00')));
+  document.getElementById('subtitle').textContent = upcomingEvents[0]
+    ? 'Nächster Abend: ' + formatDateHuman(upcomingEvents[0].datum) + ' · ' + (upcomingEvents[0].uhrzeit||'').slice(0,5)
+    : club.name;
+
+  let html = '';
+  if(cloud.myClubs.length > 1){
+    html += '<div class="club-switcher"><select id="club-select">'
+      + cloud.myClubs.map(c => '<option value="'+c.id+'" '+(c.id===cloud.activeClubId?'selected':'')+'>'+esc(c.name)+'</option>').join('')
+      + '</select></div>';
+  }
+  html += '<h2 class="section-title" style="margin-top:0;">🏛️ '+esc(club.name)+'</h2>';
+  html += '<div class="segmented">'
+    + '<button data-clubtab="events" class="'+(cloud.clubTab==='events'?'active':'')+'">Abende</button>'
+    + '<button data-clubtab="games" class="'+(cloud.clubTab==='games'?'active':'')+'">Spiele</button>'
+    + '<button data-clubtab="members" class="'+(cloud.clubTab==='members'?'active':'')+'">Mitglieder</button>'
+  + '</div>';
+
+  if(cloud.clubTab==='events'){
+    if(cloud.events.length===0){
+      html += emptyState('🎳','Noch kein Kegelabend in diesem Club.','Leg direkt den ersten Abend an – alle Mitglieder sehen ihn live.');
+    } else {
+      html += cloud.events.map(ev => {
+        const counts = rsvpCounts(ev.id);
+        const spieleCount = (ev.spiele||[]).length;
+        return '<div class="card club-event-card" data-id="'+ev.id+'" tabindex="0">'
+          + '<div class="stamp">🎳</div>'
+          + '<h3>'+esc(ev.titel || ('Kegelabend am '+formatDateHuman(ev.datum)))+'</h3>'
+          + '<div class="meta-row">📅 '+formatDateHuman(ev.datum)+' · '+esc((ev.uhrzeit||'').slice(0,5))+'</div>'
+          + '<div class="meta-row">📍 '+esc(ev.ort||'Ort offen')+'</div>'
+          + '<div class="meta-row">👥 '+counts.zugesagt+' zugesagt'+(counts.offen?(' · '+counts.offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
+        + '</div>';
+      }).join('');
     }
-    return state.friends.map(f => {
-      const st = friendStatus(f.id);
-      const on = st !== null;
-      return '<div class="friend-row">'
-        + '<button type="button" class="friend-toggle '+(on?'on':'')+'" data-friend="'+f.id+'" data-action="toggle">'+(on?'✓':'')+'</button>'
-        + '<div class="avatar" style="background:'+nameToColor(f.name)+';width:28px;height:28px;font-size:.7rem;">'+esc(initials(f.name))+'</div>'
-        + '<div class="fname">'+esc(f.name)+'</div>'
-        + '<div class="rsvp-group">'
-          + '<button type="button" class="rsvp-btn '+(st==='zugesagt'?'active ok':'')+'" data-friend="'+f.id+'" data-status="zugesagt" title="Zugesagt">✅</button>'
-          + '<button type="button" class="rsvp-btn '+(st==='offen'?'active pending':'')+'" data-friend="'+f.id+'" data-status="offen" title="Offen">❓</button>'
-          + '<button type="button" class="rsvp-btn '+(st==='abgesagt'?'active declined':'')+'" data-friend="'+f.id+'" data-status="abgesagt" title="Abgesagt">❌</button>'
-        + '</div>'
-      + '</div>';
-    }).join('');
+    html += '<div class="card dashed" id="add-club-event-card">+ Neuer Kegelabend</div>';
+  } else if(cloud.clubTab==='games'){
+    if(officialGames.length===0){
+      html += '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele im globalen Katalog. Ein Admin kann sie im Admin-Bereich anlegen.</p>';
+    } else {
+      html += officialGames.map(g => {
+        const rating = cloud.ratings[g.id];
+        const stars = rating ? rating.stars : 0;
+        return '<div class="card" style="cursor:default;">'
+          + '<div class="official-tag"><h3 style="margin:0;">'+esc(g.icon)+' '+esc(g.name)+'</h3>'
+          + '<div class="star-rating" data-game="'+g.id+'">'
+            + [1,2,3,4,5].map(n => '<button type="button" data-star="'+n+'" class="'+(n<=stars?'filled':'')+'">★</button>').join('')
+          + '</div></div>'
+          + (g.beschreibung ? '<p style="margin:6px 0 0;font-size:.85rem;color:var(--text-muted);">'+esc(g.beschreibung)+'</p>' : '')
+        + '</div>';
+      }).join('');
+    }
+  } else {
+    html += '<div class="card" style="cursor:default;">' + cloud.members.map(m => {
+      const name = m.profiles ? m.profiles.display_name : '...';
+      return '<div class="friend-row"><div class="avatar" style="background:'+nameToColor(name)+';">'+esc(initials(name))+'</div>'
+        + '<div class="fname">'+esc(name)+(m.role==='owner'?' <span class="badge outline">Owner</span>':'')+'</div></div>';
+    }).join('') + '</div>';
+    html += '<p style="font-size:.85rem;color:var(--text-muted);">Einladungscode: <strong>'+esc(club.invite_code)+'</strong> – teile ihn, damit andere beitreten können.</p>';
+    html += '<button class="btn btn-outline btn-block" id="leave-club-btn" style="margin-top:6px;">Club verlassen</button>';
+    html += '<button class="link-btn" id="logout-btn2" style="display:block;margin-top:14px;">Abmelden</button>';
   }
+  el.innerHTML = html;
+
+  const sel = document.getElementById('club-select');
+  if(sel) sel.addEventListener('change', async () => {
+    cloud.activeClubId = sel.value;
+    saveData('kegel_active_club', cloud.activeClubId);
+    await loadActiveClubData();
+    renderClub();
+  });
+  $all('[data-clubtab]', el).forEach(b => b.addEventListener('click', () => { cloud.clubTab = b.dataset.clubtab; renderClub(); updateFabVisibility(); }));
+
+  if(cloud.clubTab==='events'){
+    $all('.club-event-card', el).forEach(c => c.addEventListener('click', () => openClubEventModal(c.dataset.id)));
+    const addCard = document.getElementById('add-club-event-card');
+    if(addCard) addCard.addEventListener('click', () => openClubEventModal(null));
+  } else if(cloud.clubTab==='games'){
+    $all('.star-rating', el).forEach(row => {
+      $all('button', row).forEach(btn => btn.addEventListener('click', async () => {
+        const gameId = row.dataset.game;
+        const stars = parseInt(btn.dataset.star,10);
+        try{
+          await sb.from('club_game_ratings').upsert(
+            { club_id: cloud.activeClubId, game_id: gameId, stars, updated_by: cloud.session.user.id },
+            { onConflict: 'club_id,game_id' }
+          );
+          cloud.ratings[gameId] = { stars };
+          renderClub();
+        }catch(e){ showToast('Bewertung konnte nicht gespeichert werden.'); }
+      }));
+    });
+  } else {
+    const leaveBtn = document.getElementById('leave-club-btn');
+    if(leaveBtn) leaveBtn.addEventListener('click', async () => {
+      if(!confirm('Diesen Club wirklich verlassen?')) return;
+      await leaveClub(cloud.activeClubId);
+      renderClub();
+    });
+    const logoutBtn2 = document.getElementById('logout-btn2');
+    if(logoutBtn2) logoutBtn2.addEventListener('click', async () => { await signOut(); renderClub(); });
+  }
+}
+
+/* ---------- Modal: Club-Kegelabend (live geteilt) ---------- */
+function openClubEventModal(id){
+  const ev = id ? cloud.events.find(e=>e.id===id) : null;
+  let selectedGames = ev ? [...(ev.spiele||[])] : [];
 
   function gamesChipsHtml(){
-    if(state.games.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Kein Spiel im Bestand – leg zuerst eins im Tab "Spiele" an.</p>';
-    return '<div class="chip-row">' + state.games.map(g =>
-      '<button type="button" class="chip '+(work.spiele.includes(g.id)?'selected':'')+'" data-game="'+g.id+'">'+esc(g.icon)+' '+esc(g.name)+'</button>'
+    if(officialGames.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele im globalen Katalog.</p>';
+    return '<div class="chip-row">' + officialGames.map(g =>
+      '<button type="button" class="chip '+(selectedGames.includes(g.id)?'selected':'')+'" data-game="'+g.id+'">'+esc(g.icon)+' '+esc(g.name)+'</button>'
     ).join('') + '</div>';
   }
   function gamesOrderHtml(){
-    if(work.spiele.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele ausgewählt.</p>';
-    return '<div class="game-pick-list">' + work.spiele.map((gid,i) => {
-      const g = state.games.find(x=>x.id===gid);
+    if(selectedGames.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele ausgewählt.</p>';
+    return '<div class="game-pick-list">' + selectedGames.map((gid,i) => {
+      const g = officialGames.find(x=>x.id===gid);
       if(!g) return '';
       return '<div class="game-pick-item">'
         + '<span class="gname">'+(i+1)+'. '+esc(g.icon)+' '+esc(g.name)+'</span>'
         + '<button type="button" data-order-up="'+gid+'" '+(i===0?'disabled':'')+'>▲</button>'
-        + '<button type="button" data-order-down="'+gid+'" '+(i===work.spiele.length-1?'disabled':'')+'>▼</button>'
+        + '<button type="button" data-order-down="'+gid+'" '+(i===selectedGames.length-1?'disabled':'')+'>▼</button>'
         + '<button type="button" data-remove-game="'+gid+'">✕</button>'
       + '</div>';
     }).join('') + '</div>';
   }
+  function rsvpListHtml(){
+    if(!ev) return '<p style="font-size:.83rem;color:var(--text-muted);">Nach dem Speichern kannst du hier sehen, wer zugesagt hat.</p>';
+    const rows = cloud.rsvps.filter(r => r.event_id === ev.id);
+    if(rows.length===0) return '<p style="font-size:.83rem;color:var(--text-muted);">Noch keine Rückmeldungen.</p>';
+    return rows.map(r => {
+      const member = cloud.members.find(m=>m.user_id===r.user_id);
+      const name = member && member.profiles ? member.profiles.display_name : '...';
+      const icon = r.status==='zugesagt'?'✅':r.status==='abgesagt'?'❌':'❓';
+      return '<div class="rsvp-readonly"><span class="rstatus">'+icon+'</span> '+esc(name)+'</div>';
+    }).join('');
+  }
+  function myStatus(){
+    if(!ev || !cloud.session) return null;
+    const row = cloud.rsvps.find(r=>r.event_id===ev.id && r.user_id===cloud.session.user.id);
+    return row ? row.status : null;
+  }
 
   function bodyHtml(){
+    const st = myStatus();
     return '<h2>'+(ev?'Kegelabend bearbeiten':'Neuer Kegelabend')+'</h2>'
-      + '<div class="field"><label>Titel (optional)</label><input type="text" id="e-titel" value="'+(ev?esc(ev.titel||''):'')+'" placeholder="z.B. Sommer-Kegeln"></div>'
+      + '<p style="font-size:.8rem;color:var(--text-muted);margin-top:-8px;">Sichtbar &amp; bearbeitbar für alle Mitglieder von '+esc(activeClub()?activeClub().name:'')+'.</p>'
+      + '<div class="field"><label>Titel (optional)</label><input type="text" id="ce-titel" value="'+(ev?esc(ev.titel||''):'')+'" placeholder="z.B. Sommer-Kegeln"></div>'
       + '<div class="two-col">'
-        + '<div class="field"><label>Datum</label><input type="date" id="e-datum" value="'+(ev?ev.datum:'')+'"></div>'
-        + '<div class="field"><label>Uhrzeit</label><input type="time" id="e-uhrzeit" value="'+(ev?ev.uhrzeit:'20:00')+'"></div>'
+        + '<div class="field"><label>Datum</label><input type="date" id="ce-datum" value="'+(ev?ev.datum:'')+'"></div>'
+        + '<div class="field"><label>Uhrzeit</label><input type="time" id="ce-uhrzeit" value="'+(ev?(ev.uhrzeit||'20:00').slice(0,5):'20:00')+'"></div>'
       + '</div>'
-      + '<div class="field"><label>Ort</label><input type="text" id="e-ort" value="'+(ev?esc(ev.ort||''):'')+'" placeholder="z.B. Kegelbahn Krönchen"></div>'
-      + '<div class="field"><label>Notizen</label><textarea id="e-notizen" placeholder="z.B. Wer bringt was mit?">'+(ev?esc(ev.notizen||''):'')+'</textarea></div>'
-      + '<h2 class="section-title" style="margin-top:22px;">Teilnehmer</h2>'
-      + '<div id="friends-block">'+friendsBlockHtml()+'</div>'
+      + '<div class="field"><label>Ort</label><input type="text" id="ce-ort" value="'+(ev?esc(ev.ort||''):'')+'" placeholder="z.B. Kegelbahn Krönchen"></div>'
+      + '<div class="field"><label>Notizen</label><textarea id="ce-notizen" placeholder="z.B. Wer bringt was mit?">'+(ev?esc(ev.notizen||''):'')+'</textarea></div>'
       + '<h2 class="section-title" style="margin-top:22px;">Spiele für den Abend</h2>'
-      + '<div id="games-chips">'+gamesChipsHtml()+'</div>'
-      + '<div id="games-order">'+gamesOrderHtml()+'</div>'
+      + '<div id="ce-games-chips">'+gamesChipsHtml()+'</div>'
+      + '<div id="ce-games-order">'+gamesOrderHtml()+'</div>'
+      + (ev ? (
+          '<h2 class="section-title" style="margin-top:22px;">Deine Rückmeldung</h2>'
+          + '<div class="rsvp-group" style="margin-bottom:14px;">'
+            + '<button type="button" class="rsvp-btn '+(st==='zugesagt'?'active ok':'')+'" data-mystatus="zugesagt" title="Zugesagt">✅</button>'
+            + '<button type="button" class="rsvp-btn '+(st==='offen'?'active pending':'')+'" data-mystatus="offen" title="Offen">❓</button>'
+            + '<button type="button" class="rsvp-btn '+(st==='abgesagt'?'active declined':'')+'" data-mystatus="abgesagt" title="Abgesagt">❌</button>'
+          + '</div>'
+          + '<h2 class="section-title">Wer kommt?</h2>'
+          + '<div id="ce-rsvp-list">'+rsvpListHtml()+'</div>'
+        ) : '')
       + '<div class="modal-actions">'
-        + '<button class="btn btn-primary" id="e-save">Speichern</button>'
-        + (ev ? '<button class="btn btn-outline" id="e-share">Teilen</button>' : '')
-        + (ev ? '<button class="btn btn-alert" id="e-delete">Löschen</button>' : '')
+        + '<button class="btn btn-primary" id="ce-save">Speichern</button>'
+        + (ev ? '<button class="btn btn-alert" id="ce-delete">Löschen</button>' : '')
       + '</div>';
   }
 
+  function refreshGamesBlocks(){
+    document.getElementById('ce-games-chips').innerHTML = gamesChipsHtml();
+    document.getElementById('ce-games-order').innerHTML = gamesOrderHtml();
+    attachHandlers();
+  }
   function attachHandlers(){
-    $all('[data-action="toggle"]').forEach(btn => btn.addEventListener('click', () => {
-      toggleFriend(btn.dataset.friend);
-      refreshFriendsBlock();
-    }));
-    $all('.rsvp-btn').forEach(btn => btn.addEventListener('click', () => {
-      const fid = btn.dataset.friend;
-      if(friendStatus(fid)===null) toggleFriend(fid);
-      setStatus(fid, btn.dataset.status);
-      refreshFriendsBlock();
-    }));
     $all('.chip[data-game]').forEach(chip => chip.addEventListener('click', () => {
-      toggleGame(chip.dataset.game);
+      const gid = chip.dataset.game;
+      const idx = selectedGames.indexOf(gid);
+      if(idx>=0) selectedGames.splice(idx,1); else selectedGames.push(gid);
       refreshGamesBlocks();
     }));
-    $all('[data-order-up]').forEach(b => b.addEventListener('click', () => { moveGame(b.dataset.orderUp,-1); refreshGamesBlocks(); }));
-    $all('[data-order-down]').forEach(b => b.addEventListener('click', () => { moveGame(b.dataset.orderDown,1); refreshGamesBlocks(); }));
+    $all('[data-order-up]').forEach(b => b.addEventListener('click', () => {
+      const gid=b.dataset.orderUp, idx=selectedGames.indexOf(gid);
+      if(idx>0){ [selectedGames[idx-1],selectedGames[idx]]=[selectedGames[idx],selectedGames[idx-1]]; refreshGamesBlocks(); }
+    }));
+    $all('[data-order-down]').forEach(b => b.addEventListener('click', () => {
+      const gid=b.dataset.orderDown, idx=selectedGames.indexOf(gid);
+      if(idx<selectedGames.length-1){ [selectedGames[idx+1],selectedGames[idx]]=[selectedGames[idx],selectedGames[idx+1]]; refreshGamesBlocks(); }
+    }));
     $all('[data-remove-game]').forEach(b => b.addEventListener('click', () => {
-      work.spiele = work.spiele.filter(id=>id!==b.dataset.removeGame);
+      selectedGames = selectedGames.filter(gid=>gid!==b.dataset.removeGame);
       refreshGamesBlocks();
     }));
-
-    document.getElementById('e-save').addEventListener('click', saveEvent);
-    const shareBtn = document.getElementById('e-share');
-    if(shareBtn) shareBtn.addEventListener('click', () => shareEvent(ev, work));
-    const delBtn = document.getElementById('e-delete');
-    if(delBtn) delBtn.addEventListener('click', () => {
-      state.events = state.events.filter(e=>e.id!==ev.id);
-      persistEvents();
-      renderEvents();
-      closeModal();
-      showToast('Kegelabend gelöscht');
+    $all('[data-mystatus]').forEach(b => b.addEventListener('click', async () => {
+      try{
+        await sb.from('club_event_rsvp').upsert(
+          { event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: b.dataset.mystatus },
+          { onConflict: 'event_id,user_id' }
+        );
+        const existing = cloud.rsvps.find(r=>r.event_id===ev.id && r.user_id===cloud.session.user.id);
+        if(existing) existing.status = b.dataset.mystatus;
+        else cloud.rsvps.push({ event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: b.dataset.mystatus });
+        refreshModalBody();
+      }catch(e){ showToast('Konnte Rückmeldung nicht speichern.'); }
+    }));
+    const saveBtn = document.getElementById('ce-save');
+    if(saveBtn) saveBtn.addEventListener('click', saveClubEvent);
+    const delBtn = document.getElementById('ce-delete');
+    if(delBtn) delBtn.addEventListener('click', async () => {
+      if(!confirm('Diesen Kegelabend wirklich löschen?')) return;
+      try{
+        await sb.from('club_events').delete().eq('id', ev.id);
+        cloud.events = cloud.events.filter(e=>e.id!==ev.id);
+        renderClub();
+        closeModal();
+        showToast('Kegelabend gelöscht');
+      }catch(e){ showToast('Fehler beim Löschen.'); }
     });
   }
-  function refreshFriendsBlock(){
-    document.getElementById('friends-block').innerHTML = friendsBlockHtml();
+  function refreshModalBody(){
+    modalContent.innerHTML = '<div class="modal-inner-wrap"><button class="modal-close" id="modal-close-btn" aria-label="Schließen">✕</button>' + bodyHtml() + '</div>';
+    document.getElementById('modal-close-btn').addEventListener('click', closeModal);
     attachHandlers();
   }
-  function refreshGamesBlocks(){
-    document.getElementById('games-chips').innerHTML = gamesChipsHtml();
-    document.getElementById('games-order').innerHTML = gamesOrderHtml();
-    attachHandlers();
-  }
-  function saveEvent(){
-    const datum = document.getElementById('e-datum').value;
+  async function saveClubEvent(){
+    const datum = document.getElementById('ce-datum').value;
     if(!datum){ showToast('Bitte ein Datum wählen.'); return; }
-    const data = {
-      id: ev ? ev.id : uid(),
-      titel: document.getElementById('e-titel').value.trim(),
+    const payload = {
+      club_id: cloud.activeClubId,
+      titel: document.getElementById('ce-titel').value.trim(),
       datum,
-      uhrzeit: document.getElementById('e-uhrzeit').value || '20:00',
-      ort: document.getElementById('e-ort').value.trim(),
-      notizen: document.getElementById('e-notizen').value.trim(),
-      teilnehmer: work.teilnehmer,
-      spiele: work.spiele
+      uhrzeit: document.getElementById('ce-uhrzeit').value || '20:00',
+      ort: document.getElementById('ce-ort').value.trim(),
+      notizen: document.getElementById('ce-notizen').value.trim(),
+      spiele: selectedGames
     };
-    if(ev){
-      const idx = state.events.findIndex(e=>e.id===ev.id);
-      state.events[idx] = data;
-    } else {
-      state.events.push(data);
-    }
-    persistEvents();
-    renderEvents();
-    closeModal();
-    showToast('Kegelabend gespeichert 🎳');
+    try{
+      let savedId;
+      if(ev){
+        const { error } = await sb.from('club_events').update(payload).eq('id', ev.id);
+        if(error) throw error;
+        savedId = ev.id;
+      } else {
+        payload.created_by = cloud.session.user.id;
+        const { data, error } = await sb.from('club_events').insert(payload).select().single();
+        if(error) throw error;
+        savedId = data.id;
+        await sb.from('club_event_rsvp').upsert(
+          { event_id: savedId, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: 'zugesagt' },
+          { onConflict: 'event_id,user_id' }
+        );
+      }
+      await loadActiveClubData();
+      renderClub();
+      closeModal();
+      showToast('Kegelabend gespeichert 🎳');
+    }catch(e){ showToast('Fehler beim Speichern: '+(e.message||'unbekannt')); }
   }
 
   openModal(bodyHtml());
   attachHandlers();
+  refreshOpenEventRsvpIfAny = function(){
+    const list = document.getElementById('ce-rsvp-list');
+    if(ev && list) list.innerHTML = rsvpListHtml();
+  };
 }
 
-/* ---------- Share / Einladungstext ---------- */
-function shareEvent(ev, work){
-  const teilnehmerLines = work.teilnehmer.map(t => {
-    const f = state.friends.find(fr=>fr.id===t.friendId);
-    if(!f) return null;
-    const icon = t.status==='zugesagt' ? '✅' : t.status==='abgesagt' ? '❌' : '❓';
-    return icon + ' ' + f.name;
-  }).filter(Boolean).join('\n');
-  const spieleLines = work.spiele.map((gid,i) => {
-    const g = state.games.find(x=>x.id===gid);
-    return g ? (i+1)+'. '+g.icon+' '+g.name : null;
-  }).filter(Boolean).join('\n');
+/* =========================================================
+   RENDER: ADMIN (zentraler Spiele-Katalog)
+   ========================================================= */
+function renderAdmin(){
+  const el = document.getElementById('view-admin');
+  if(!isAdmin()){ el.innerHTML = ''; return; }
+  let html = '<h2 class="section-title">🛠️ Globaler Spiele-Katalog</h2>';
+  html += '<p style="font-size:.82rem;color:var(--text-muted);margin:-6px 0 10px;">Änderungen sind sofort für alle Clubs sichtbar.</p>';
+  if(officialGames.length===0){
+    html += emptyState('🛠️','Noch kein offizielles Spiel angelegt.','Leg das erste Spiel im globalen Katalog an.');
+  } else {
+    html += '<div id="admin-game-list">' + officialGames.map(g => gameCard(g, false)).join('') + '</div>';
+  }
+  html += '<div class="card dashed" id="add-admin-game-card">+ Neues offizielles Spiel</div>';
+  el.innerHTML = html;
+  $all('#admin-game-list .game-card', el).forEach(c => c.addEventListener('click', () => openAdminGameModal(c.dataset.id)));
+  const addCard = document.getElementById('add-admin-game-card');
+  if(addCard) addCard.addEventListener('click', () => openAdminGameModal(null));
+}
 
-  const titel = document.getElementById('e-titel') ? document.getElementById('e-titel').value.trim() : (ev.titel||'');
-  const datum = document.getElementById('e-datum') ? document.getElementById('e-datum').value : ev.datum;
-  const uhrzeit = document.getElementById('e-uhrzeit') ? document.getElementById('e-uhrzeit').value : ev.uhrzeit;
-  const ort = document.getElementById('e-ort') ? document.getElementById('e-ort').value.trim() : ev.ort;
-
-  let text = '🎳 ' + (titel || 'KEGELABEND') + ' 🎳\n';
-  text += '📅 ' + formatDateHuman(datum) + ' um ' + (uhrzeit||'') + ' Uhr\n';
-  if(ort) text += '📍 ' + ort + '\n';
-  text += '\n';
-  if(teilnehmerLines){ text += 'Teilnehmer:\n' + teilnehmerLines + '\n\n'; }
-  if(spieleLines){ text += 'Spiele heute:\n' + spieleLines + '\n\n'; }
-  text += 'Bis dann! 🍻';
-
+function openAdminGameModal(id){
+  const game = id ? officialGames.find(g=>g.id===id) : null;
+  const emojiRow = GAME_EMOJIS.map(e =>
+    '<button type="button" class="emoji-opt '+(game && game.icon===e ? 'selected':'')+'" data-emoji="'+e+'">'+e+'</button>'
+  ).join('');
   openModal(
-    '<h2>Einladung teilen</h2>'
-    + '<div class="field share-box"><textarea id="share-text" readonly>'+esc(text)+'</textarea></div>'
+    '<h2>'+(game?'Offizielles Spiel bearbeiten':'Neues offizielles Spiel')+'</h2>'
+    + '<div class="field"><label>Icon</label><div class="emoji-pick">'+emojiRow+'</div></div>'
+    + '<div class="field"><label>Name</label><input type="text" id="ag-name" value="'+(game?esc(game.name):'')+'" placeholder="z.B. Bierkegeln"></div>'
+    + '<div class="field"><label>Beschreibung</label><textarea id="ag-desc">'+(game?esc(game.beschreibung||''):'')+'</textarea></div>'
+    + '<div class="two-col">'
+      + '<div class="field"><label>Min. Spieler</label><input type="number" id="ag-min" min="1" value="'+(game?game.minSpieler:2)+'"></div>'
+      + '<div class="field"><label>Max. Spieler</label><input type="number" id="ag-max" min="1" value="'+(game?game.maxSpieler:8)+'"></div>'
+    + '</div>'
+    + '<div class="field"><label>Dauer (Minuten)</label><input type="number" id="ag-dauer" min="1" value="'+(game?game.dauer:20)+'"></div>'
     + '<div class="modal-actions">'
-      + '<button class="btn btn-primary" id="share-native">Teilen</button>'
-      + '<button class="btn btn-outline" id="share-copy">Kopieren</button>'
+      + '<button class="btn btn-primary" id="ag-save">Speichern</button>'
+      + (game ? '<button class="btn btn-alert" id="ag-delete">Löschen</button>' : '')
     + '</div>'
   );
-  document.getElementById('share-native').addEventListener('click', async () => {
-    if(navigator.share){
-      try{ await navigator.share({ text, title:'Kegelabend' }); }catch(e){ /* abgebrochen */ }
-    } else {
-      copyToClipboard(text);
-    }
+  let selectedEmoji = game ? (game.icon || GAME_EMOJIS[0]) : GAME_EMOJIS[0];
+  $all('.emoji-opt').forEach(btn => btn.addEventListener('click', () => {
+    selectedEmoji = btn.dataset.emoji;
+    $all('.emoji-opt').forEach(b=>b.classList.remove('selected'));
+    btn.classList.add('selected');
+  }));
+  if(!game){ $all('.emoji-opt')[0].classList.add('selected'); }
+
+  document.getElementById('ag-save').addEventListener('click', async () => {
+    const name = document.getElementById('ag-name').value.trim();
+    if(!name){ showToast('Bitte einen Namen eintragen.'); return; }
+    const payload = {
+      icon: selectedEmoji,
+      name,
+      beschreibung: document.getElementById('ag-desc').value.trim(),
+      min_spieler: parseInt(document.getElementById('ag-min').value,10) || 1,
+      max_spieler: parseInt(document.getElementById('ag-max').value,10) || 1,
+      dauer: parseInt(document.getElementById('ag-dauer').value,10) || 10
+    };
+    try{
+      if(game){
+        const { error } = await sb.from('games').update(payload).eq('id', game.id);
+        if(error) throw error;
+      } else {
+        payload.created_by = cloud.session.user.id;
+        const { error } = await sb.from('games').insert(payload);
+        if(error) throw error;
+      }
+      await refreshOfficialGames();
+      renderAdmin();
+      if(state.tab==='games') renderGames();
+      closeModal();
+      showToast('Gespeichert 🎳');
+    }catch(e){ showToast('Fehler: '+(e.message||'unbekannt')); }
   });
-  document.getElementById('share-copy').addEventListener('click', () => copyToClipboard(text));
-}
-function copyToClipboard(text){
-  if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(text).then(()=> showToast('In Zwischenablage kopiert 📋')).catch(()=> fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
-  }
-}
-function fallbackCopy(text){
-  const ta = document.getElementById('share-text');
-  if(ta){ ta.select(); try{ document.execCommand('copy'); showToast('In Zwischenablage kopiert 📋'); }catch(e){ showToast('Kopieren nicht möglich – Text manuell markieren.'); } }
+  const delBtn = document.getElementById('ag-delete');
+  if(delBtn) delBtn.addEventListener('click', async () => {
+    if(!confirm('Dieses offizielle Spiel wirklich löschen?')) return;
+    try{
+      const { error } = await sb.from('games').delete().eq('id', game.id);
+      if(error) throw error;
+      await refreshOfficialGames();
+      renderAdmin();
+      closeModal();
+      showToast('Gelöscht');
+    }catch(e){ showToast('Fehler: '+(e.message||'unbekannt')); }
+  });
 }
 
 /* ---------- Tabs & FAB ---------- */
@@ -952,20 +1406,62 @@ function setTab(tab){
   $all('nav.tabbar button').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
   renderAll();
 }
-$all('nav.tabbar button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+$all('#tabbar button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+
+function updateFabVisibility(){
+  const fab = document.getElementById('fab');
+  if(state.tab==='club'){
+    fab.style.display = (isLoggedIn() && activeClub() && cloud.clubTab==='events') ? 'flex' : 'none';
+  } else if(state.tab==='admin'){
+    fab.style.display = isAdmin() ? 'flex' : 'none';
+  } else {
+    fab.style.display = 'flex';
+  }
+}
 
 document.getElementById('fab').addEventListener('click', () => {
-  if(state.tab==='events') openEventModal(null);
-  else if(state.tab==='games') openGameModal(null);
-  else openFriendModal(null);
+  if(state.tab==='games') openGameModal(null);
+  else if(state.tab==='club'){ if(isLoggedIn() && activeClub() && cloud.clubTab==='events') openClubEventModal(null); }
+  else if(state.tab==='admin'){ if(isAdmin()) openAdminGameModal(null); }
 });
 
 function renderAll(){
-  renderEvents();
   renderGames();
-  renderFriends();
+  renderClub();
+  renderAdmin();
+  updateFabVisibility();
 }
 renderAll();
+initCloud();
+
+/* ---------- Diagnose-Hilfe (temporär) ----------
+   Gibt keine neuen Rechte frei - sb/cloud haben ohnehin nur die
+   Berechtigungen deines eigenen eingeloggten Kontos. Dient nur dazu,
+   den aktuellen Auth-/Session-Zustand direkt in der Browser-Konsole
+   (F12 -> Console) inspizieren zu können, z.B. mit:
+     await window.__kegelDebug.checkAuth()
+*/
+window.__kegelDebug = {
+  cloudEnabled,
+  get session(){ return cloud.session; },
+  get profile(){ return cloud.profile; },
+  async checkAuth(){
+    if(!sb){ console.log('Supabase-Client ist nicht initialisiert (cloudEnabled=false).'); return; }
+    const { data, error } = await sb.auth.getSession();
+    console.log('getSession() Fehler:', error);
+    console.log('Session vorhanden:', !!data.session);
+    if(data.session){
+      console.log('user.id (sollte einer echten UUID entsprechen):', data.session.user.id);
+      console.log('access_token vorhanden:', !!data.session.access_token);
+      console.log('access_token läuft ab um:', new Date(data.session.expires_at*1000).toLocaleString());
+      const payload = JSON.parse(atob(data.session.access_token.split('.')[1]));
+      console.log('Im Token enthaltene Rolle (sollte "authenticated" sein):', payload.role);
+      console.log('Im Token enthaltene User-ID (sub):', payload.sub);
+    }
+    console.log('cloud.session.user.id (von der App zwischengespeichert):', cloud.session ? cloud.session.user.id : null);
+  }
+};
+
 
 /* ---------- Service Worker (nur wenn gehostet, nicht bei file://) ---------- */
 if('serviceWorker' in navigator && location.protocol !== 'file:'){
