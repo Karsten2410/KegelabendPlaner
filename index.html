@@ -467,6 +467,49 @@
 
   .rsvp-readonly{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:.88rem;}
   .rsvp-readonly .rstatus{font-size:1rem;}
+
+  /* ---------- Königsspiel / Ergebnisse ---------- */
+  .crown-btn{
+    background:none;font-size:1.1rem;padding:2px 4px;
+    opacity:.3;filter:grayscale(1);
+  }
+  .crown-btn.active{opacity:1;filter:none;}
+  .result-block{
+    background:var(--surface);
+    border:1.5px solid rgba(91,58,41,.15);
+    border-radius:12px;
+    padding:12px;
+    margin-bottom:10px;
+  }
+  .result-block.is-koenig{border-color:var(--accent-dark);background:linear-gradient(180deg, rgba(217,164,65,.1), var(--surface));}
+  .result-block h4{margin:0 0 8px;font-size:.92rem;display:flex;align-items:center;gap:6px;}
+  .rank-list{display:flex;flex-direction:column;gap:6px;margin-bottom:10px;}
+  .rank-item{
+    display:flex;align-items:center;gap:8px;
+    background:var(--bg);border:1.5px solid rgba(91,58,41,.2);
+    border-radius:9px;padding:6px 10px;font-size:.88rem;
+  }
+  .rank-item .rank-num{
+    font-family:var(--font-mono);font-weight:800;color:var(--accent-dark);
+    width:20px;flex-shrink:0;
+  }
+  .rank-item .rname{flex:1;}
+  .rank-item button{background:none;color:var(--text-muted);font-size:.9rem;}
+  .pool-chips{display:flex;flex-wrap:wrap;gap:6px;}
+  .winner-chip{
+    display:inline-flex;align-items:center;gap:5px;
+    padding:6px 12px;border-radius:999px;
+    border:2px solid var(--wood);background:var(--surface);
+    font-size:.85rem;font-weight:600;
+  }
+  .winner-chip.selected{background:var(--accent);border-color:var(--accent-dark);color:var(--dark);}
+  .hof-item{
+    display:flex;align-items:center;gap:12px;
+    padding:10px 0;border-bottom:1px solid rgba(91,58,41,.08);
+  }
+  .hof-item:last-child{border-bottom:none;}
+  .hof-rank{font-family:var(--font-mono);font-weight:800;width:28px;font-size:1.05rem;color:var(--wood);}
+  .hof-count{margin-left:auto;font-family:var(--font-mono);font-weight:700;color:var(--accent-dark);font-size:.9rem;}
 </style>
 </head>
 <body>
@@ -592,8 +635,8 @@ function persistGames(){ saveData(K.games, state.games); }
    Settings -> API in deinem Supabase-Dashboard). Ohne diese
    Angaben funktioniert die App weiterhin normal im Solo-Modus –
    der Club-Tab zeigt dann nur einen Einrichtungshinweis. */
-const SUPABASE_URL = 'https://jaiemxlsukjskeouuekc.supabase.co';        // z.B. 'https://xxxxxxxx.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImphaWVteGxzdWtqc2tlb3V1ZWtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NzQ4MDksImV4cCI6MjA5OTI1MDgwOX0.u3O1wfnI0g9a8ajfOZI3AHz1g8EtWxdWjact4i7tf5g';   // der "anon public" Key aus Supabase
+const SUPABASE_URL = '';        // z.B. 'https://xxxxxxxx.supabase.co'
+const SUPABASE_ANON_KEY = '';   // der "anon public" Key aus Supabase
 
 let sb = null;
 if(SUPABASE_URL && SUPABASE_ANON_KEY && typeof window.supabase !== 'undefined'){
@@ -610,8 +653,9 @@ const cloud = {
   members: [],             // Mitglieder des aktiven Clubs
   events: [],               // Kegelabende des aktiven Clubs
   rsvps: [],                 // alle RSVPs des aktiven Clubs (über alle Events)
+  results: [],                // alle Ergebnisse/Platzierungen (Königsspiel + normale Spiele)
   ratings: {},               // { game_id: {stars, updated_by} } für aktiven Club
-  clubTab: 'events'          // Unter-Tab innerhalb "Club": events | games | members
+  clubTab: 'events'          // Unter-Tab innerhalb "Club": events | games | members | hof
 };
 let officialGames = loadData('kegel_official_games_v1', []);
 let realtimeChannel = null;
@@ -726,17 +770,19 @@ async function leaveClub(clubId){
 async function loadActiveClubData(){
   teardownRealtime();
   const clubId = cloud.activeClubId;
-  if(!clubId){ cloud.members=[]; cloud.events=[]; cloud.rsvps=[]; cloud.ratings={}; return; }
+  if(!clubId){ cloud.members=[]; cloud.events=[]; cloud.rsvps=[]; cloud.ratings={}; cloud.results=[]; return; }
 
-  const [membersRes, eventsRes, ratingsRes, rsvpRes] = await Promise.all([
+  const [membersRes, eventsRes, ratingsRes, rsvpRes, resultsRes] = await Promise.all([
     sb.from('club_members').select('user_id, role, profiles ( display_name )').eq('club_id', clubId),
     sb.from('club_events').select('*').eq('club_id', clubId).order('datum', { ascending: true }),
     sb.from('club_game_ratings').select('*').eq('club_id', clubId),
-    sb.from('club_event_rsvp').select('*').eq('club_id', clubId)
+    sb.from('club_event_rsvp').select('*').eq('club_id', clubId),
+    sb.from('club_event_results').select('*').eq('club_id', clubId)
   ]);
   cloud.members = membersRes.error ? [] : membersRes.data;
   cloud.events = eventsRes.error ? [] : eventsRes.data;
   cloud.rsvps = rsvpRes.error ? [] : rsvpRes.data;
+  cloud.results = resultsRes.error ? [] : resultsRes.data;
   cloud.ratings = {};
   if(!ratingsRes.error){
     ratingsRes.data.forEach(r => { cloud.ratings[r.game_id] = r; });
@@ -772,11 +818,18 @@ function setupRealtime(clubId){
       cloud.members = data || [];
       if(state.tab==='club') renderClub();
     })
+    .on('postgres_changes', { event:'*', schema:'public', table:'club_event_results', filter:'club_id=eq.'+clubId }, async () => {
+      const { data } = await sb.from('club_event_results').select('*').eq('club_id', clubId);
+      cloud.results = data || [];
+      if(state.tab==='club') renderClub();
+      refreshOpenEventResultsIfAny();
+    })
     .subscribe();
 }
 // Platzhalter, wird weiter unten (Event-Detail-Modal) mit echter Funktion belegt,
-// damit ein offenes Modal die RSVP-Liste live nachziehen kann.
+// damit ein offenes Modal die RSVP-Liste bzw. Ergebnisse live nachziehen kann.
 let refreshOpenEventRsvpIfAny = function(){};
+let refreshOpenEventResultsIfAny = function(){};
 
 /* ---------- Supabase-Session verdrahten ---------- */
 async function initCloud(){
@@ -962,6 +1015,33 @@ function rsvpCounts(eventId){
     abgesagt: rows.filter(r=>r.status==='abgesagt').length
   };
 }
+function memberName(userId){
+  const m = cloud.members.find(x=>x.user_id===userId);
+  return m && m.profiles ? m.profiles.display_name : '...';
+}
+// Ergebnisse für ein bestimmtes Spiel eines Abends, sortiert nach Platz
+function resultsFor(eventId, gameId){
+  return cloud.results
+    .filter(r => r.event_id===eventId && r.game_id===gameId)
+    .sort((a,b) => a.platz - b.platz);
+}
+// König eines Abends: platz=1 beim als Königsspiel markierten Spiel
+function koenigOf(ev){
+  if(!ev.koenigsspiel_game_id) return null;
+  const winner = resultsFor(ev.id, ev.koenigsspiel_game_id).find(r=>r.platz===1);
+  return winner ? winner.user_id : null;
+}
+// Bestenliste: wie oft war wer König, über alle Abende des Clubs hinweg
+function hallOfFame(){
+  const counts = {};
+  cloud.events.forEach(ev => {
+    const koenigId = koenigOf(ev);
+    if(koenigId) counts[koenigId] = (counts[koenigId]||0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([userId, count]) => ({ userId, count, name: memberName(userId) }))
+    .sort((a,b) => b.count - a.count);
+}
 
 function renderClub(){
   const el = document.getElementById('view-club');
@@ -1052,6 +1132,7 @@ function renderClub(){
   html += '<div class="segmented">'
     + '<button data-clubtab="events" class="'+(cloud.clubTab==='events'?'active':'')+'">Abende</button>'
     + '<button data-clubtab="games" class="'+(cloud.clubTab==='games'?'active':'')+'">Spiele</button>'
+    + '<button data-clubtab="hof" class="'+(cloud.clubTab==='hof'?'active':'')+'">Bestenliste</button>'
     + '<button data-clubtab="members" class="'+(cloud.clubTab==='members'?'active':'')+'">Mitglieder</button>'
   + '</div>';
 
@@ -1062,12 +1143,14 @@ function renderClub(){
       html += cloud.events.map(ev => {
         const counts = rsvpCounts(ev.id);
         const spieleCount = (ev.spiele||[]).length;
+        const koenigId = koenigOf(ev);
         return '<div class="card club-event-card" data-id="'+ev.id+'" tabindex="0">'
           + '<div class="stamp">🎳</div>'
           + '<h3>'+esc(ev.titel || ('Kegelabend am '+formatDateHuman(ev.datum)))+'</h3>'
           + '<div class="meta-row">📅 '+formatDateHuman(ev.datum)+' · '+esc((ev.uhrzeit||'').slice(0,5))+'</div>'
           + '<div class="meta-row">📍 '+esc(ev.ort||'Ort offen')+'</div>'
           + '<div class="meta-row">👥 '+counts.zugesagt+' zugesagt'+(counts.offen?(' · '+counts.offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
+          + (koenigId ? '<div class="meta-row">👑 König: '+esc(memberName(koenigId))+'</div>' : (ev.koenigsspiel_game_id ? '<div class="meta-row" style="color:var(--text-muted);">👑 Königsspiel noch ohne Ergebnis</div>' : ''))
         + '</div>';
       }).join('');
     }
@@ -1087,6 +1170,21 @@ function renderClub(){
           + (g.beschreibung ? '<p style="margin:6px 0 0;font-size:.85rem;color:var(--text-muted);">'+esc(g.beschreibung)+'</p>' : '')
         + '</div>';
       }).join('');
+    }
+  } else if(cloud.clubTab==='hof'){
+    const hof = hallOfFame();
+    if(hof.length===0){
+      html += emptyState('👑','Noch kein König gekrönt.','Sobald ein Abend mit Königsspiel ein Ergebnis hat, taucht hier die Bestenliste auf.');
+    } else {
+      const medals = ['🥇','🥈','🥉'];
+      html += '<div class="card" style="cursor:default;">' + hof.map((h,i) =>
+        '<div class="hof-item">'
+          + '<span class="hof-rank">'+(medals[i]||(i+1)+'.')+'</span>'
+          + '<div class="avatar" style="background:'+nameToColor(h.name)+';">'+esc(initials(h.name))+'</div>'
+          + '<div class="fname">'+esc(h.name)+'</div>'
+          + '<span class="hof-count">'+h.count+'× König</span>'
+        + '</div>'
+      ).join('') + '</div>';
     }
   } else {
     html += '<div class="card" style="cursor:default;">' + cloud.members.map(m => {
@@ -1144,6 +1242,7 @@ function renderClub(){
 function openClubEventModal(id){
   const ev = id ? cloud.events.find(e=>e.id===id) : null;
   let selectedGames = ev ? [...(ev.spiele||[])] : [];
+  let koenigGameId = ev ? (ev.koenigsspiel_game_id || null) : null;
 
   function gamesChipsHtml(){
     if(officialGames.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele im globalen Katalog.</p>';
@@ -1153,16 +1252,58 @@ function openClubEventModal(id){
   }
   function gamesOrderHtml(){
     if(selectedGames.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele ausgewählt.</p>';
-    return '<div class="game-pick-list">' + selectedGames.map((gid,i) => {
+    return '<p style="font-size:.78rem;color:var(--text-muted);margin:2px 0 8px;">👑 antippen, um das Königsspiel des Abends festzulegen.</p>'
+      + '<div class="game-pick-list">' + selectedGames.map((gid,i) => {
       const g = officialGames.find(x=>x.id===gid);
       if(!g) return '';
       return '<div class="game-pick-item">'
+        + '<button type="button" class="crown-btn '+(koenigGameId===gid?'active':'')+'" data-crown="'+gid+'" title="Als Königsspiel markieren">👑</button>'
         + '<span class="gname">'+(i+1)+'. '+esc(g.icon)+' '+esc(g.name)+'</span>'
         + '<button type="button" data-order-up="'+gid+'" '+(i===0?'disabled':'')+'>▲</button>'
         + '<button type="button" data-order-down="'+gid+'" '+(i===selectedGames.length-1?'disabled':'')+'>▼</button>'
         + '<button type="button" data-remove-game="'+gid+'">✕</button>'
       + '</div>';
     }).join('') + '</div>';
+  }
+  function confirmedParticipants(){
+    if(!ev) return [];
+    return cloud.rsvps
+      .filter(r => r.event_id===ev.id && r.status==='zugesagt')
+      .map(r => ({ user_id: r.user_id, name: memberName(r.user_id) }));
+  }
+  function resultBlockHtml(gid){
+    const g = officialGames.find(x=>x.id===gid);
+    if(!g) return '';
+    const isKoenig = koenigGameId === gid;
+    const participants = confirmedParticipants();
+    const existing = resultsFor(ev.id, gid);
+    if(isKoenig){
+      const rankedIds = existing.map(r=>r.user_id);
+      const pool = participants.filter(p => !rankedIds.includes(p.user_id));
+      return '<div class="result-block is-koenig">'
+        + '<h4>👑 Königsspiel: '+esc(g.name)+'</h4>'
+        + (participants.length===0 ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>' : '')
+        + (existing.length ? '<div class="rank-list">' + existing.map((r,i) =>
+            '<div class="rank-item"><span class="rank-num">'+(i+1)+(i===0?'. 👑':'.')+'</span><span class="rname">'+esc(memberName(r.user_id))+'</span><button type="button" data-unrank="'+gid+'|'+r.user_id+'">✕</button></div>'
+          ).join('') + '</div>' : '')
+        + (pool.length ? '<div class="pool-chips">' + pool.map(p =>
+            '<button type="button" class="winner-chip" data-rank-add="'+gid+'|'+p.user_id+'">+ '+esc(p.name)+'</button>'
+          ).join('') + '</div>' : '')
+      + '</div>';
+    }
+    const winner = existing.find(r=>r.platz===1);
+    return '<div class="result-block">'
+      + '<h4>'+esc(g.icon)+' '+esc(g.name)+'</h4>'
+      + (participants.length===0
+          ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>'
+          : '<div class="pool-chips">' + participants.map(p =>
+              '<button type="button" class="winner-chip '+(winner&&winner.user_id===p.user_id?'selected':'')+'" data-winner="'+gid+'|'+p.user_id+'">'+esc(p.name)+'</button>'
+            ).join('') + '</div>')
+    + '</div>';
+  }
+  function resultsBlockHtml(){
+    if(!ev || selectedGames.length===0) return '<p style="font-size:.83rem;color:var(--text-muted);">Nach dem Speichern und Auswählen von Spielen kannst du hier Ergebnisse eintragen.</p>';
+    return selectedGames.map(gid => resultBlockHtml(gid)).join('');
   }
   function rsvpListHtml(){
     if(!ev) return '<p style="font-size:.83rem;color:var(--text-muted);">Nach dem Speichern kannst du hier sehen, wer zugesagt hat.</p>';
@@ -1204,6 +1345,8 @@ function openClubEventModal(id){
           + '</div>'
           + '<h2 class="section-title">Wer kommt?</h2>'
           + '<div id="ce-rsvp-list">'+rsvpListHtml()+'</div>'
+          + '<h2 class="section-title" style="margin-top:22px;">Ergebnisse</h2>'
+          + '<div id="ce-results">'+resultsBlockHtml()+'</div>'
         ) : '')
       + '<div class="modal-actions">'
         + '<button class="btn btn-primary" id="ce-save">Speichern</button>'
@@ -1214,7 +1357,68 @@ function openClubEventModal(id){
   function refreshGamesBlocks(){
     document.getElementById('ce-games-chips').innerHTML = gamesChipsHtml();
     document.getElementById('ce-games-order').innerHTML = gamesOrderHtml();
+    const resultsEl = document.getElementById('ce-results');
+    if(resultsEl) resultsEl.innerHTML = resultsBlockHtml();
     attachHandlers();
+  }
+  async function setKoenigGame(gid){
+    const newVal = koenigGameId === gid ? null : gid;
+    koenigGameId = newVal;
+    if(ev){
+      try{
+        await sb.from('club_events').update({ koenigsspiel_game_id: newVal }).eq('id', ev.id);
+        ev.koenigsspiel_game_id = newVal;
+        const idx = cloud.events.findIndex(e=>e.id===ev.id);
+        if(idx>=0) cloud.events[idx].koenigsspiel_game_id = newVal;
+      }catch(e){ showToast('Konnte Königsspiel nicht speichern.'); }
+    }
+    refreshGamesBlocks();
+  }
+  async function addRank(gid, userId){
+    const nextPlatz = resultsFor(ev.id, gid).length + 1;
+    try{
+      const { error } = await sb.from('club_event_results').upsert(
+        { event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: nextPlatz, updated_by: cloud.session.user.id },
+        { onConflict: 'event_id,game_id,user_id' }
+      );
+      if(error) throw error;
+      cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: nextPlatz });
+      refreshGamesBlocks();
+      renderClub();
+    }catch(e){ showToast('Konnte Platzierung nicht speichern.'); }
+  }
+  async function removeRank(gid, userId){
+    try{
+      await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid).eq('user_id', userId);
+      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid && r.user_id===userId));
+      // verbleibende Plätze lückenlos neu nummerieren (1,2,3,...)
+      const remaining = resultsFor(ev.id, gid);
+      for(let i=0;i<remaining.length;i++){
+        const wantedPlatz = i+1;
+        if(remaining[i].platz !== wantedPlatz){
+          remaining[i].platz = wantedPlatz;
+          await sb.from('club_event_results').update({ platz: wantedPlatz }).eq('event_id', ev.id).eq('game_id', gid).eq('user_id', remaining[i].user_id);
+        }
+      }
+      refreshGamesBlocks();
+      renderClub();
+    }catch(e){ showToast('Konnte Platzierung nicht entfernen.'); }
+  }
+  async function setWinner(gid, userId){
+    const current = resultsFor(ev.id, gid).find(r=>r.platz===1);
+    try{
+      await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid);
+      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
+      if(!current || current.user_id !== userId){
+        const { error } = await sb.from('club_event_results').insert(
+          { event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: 1, updated_by: cloud.session.user.id }
+        );
+        if(error) throw error;
+        cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: 1 });
+      }
+      refreshGamesBlocks();
+      renderClub();
+    }catch(e){ showToast('Konnte Sieger nicht speichern.'); }
   }
   function attachHandlers(){
     $all('.chip[data-game]').forEach(chip => chip.addEventListener('click', () => {
@@ -1234,6 +1438,19 @@ function openClubEventModal(id){
     $all('[data-remove-game]').forEach(b => b.addEventListener('click', () => {
       selectedGames = selectedGames.filter(gid=>gid!==b.dataset.removeGame);
       refreshGamesBlocks();
+    }));
+    $all('[data-crown]').forEach(b => b.addEventListener('click', () => setKoenigGame(b.dataset.crown)));
+    $all('[data-rank-add]').forEach(b => b.addEventListener('click', () => {
+      const [gid, userId] = b.dataset.rankAdd.split('|');
+      addRank(gid, userId);
+    }));
+    $all('[data-unrank]').forEach(b => b.addEventListener('click', () => {
+      const [gid, userId] = b.dataset.unrank.split('|');
+      removeRank(gid, userId);
+    }));
+    $all('[data-winner]').forEach(b => b.addEventListener('click', () => {
+      const [gid, userId] = b.dataset.winner.split('|');
+      setWinner(gid, userId);
     }));
     $all('[data-mystatus]').forEach(b => b.addEventListener('click', async () => {
       try{
@@ -1276,7 +1493,8 @@ function openClubEventModal(id){
       uhrzeit: document.getElementById('ce-uhrzeit').value || '20:00',
       ort: document.getElementById('ce-ort').value.trim(),
       notizen: document.getElementById('ce-notizen').value.trim(),
-      spiele: selectedGames
+      spiele: selectedGames,
+      koenigsspiel_game_id: koenigGameId
     };
     try{
       let savedId;
@@ -1306,6 +1524,10 @@ function openClubEventModal(id){
   refreshOpenEventRsvpIfAny = function(){
     const list = document.getElementById('ce-rsvp-list');
     if(ev && list) list.innerHTML = rsvpListHtml();
+  };
+  refreshOpenEventResultsIfAny = function(){
+    const resultsEl = document.getElementById('ce-results');
+    if(ev && resultsEl) resultsEl.innerHTML = resultsBlockHtml();
   };
 }
 
