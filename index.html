@@ -635,8 +635,8 @@ function persistGames(){ saveData(K.games, state.games); }
    Settings -> API in deinem Supabase-Dashboard). Ohne diese
    Angaben funktioniert die App weiterhin normal im Solo-Modus –
    der Club-Tab zeigt dann nur einen Einrichtungshinweis. */
-const SUPABASE_URL = '';        // z.B. 'https://xxxxxxxx.supabase.co'
-const SUPABASE_ANON_KEY = '';   // der "anon public" Key aus Supabase
+const SUPABASE_URL = 'https://jaiemxlsukjskeouuekc.supabase.co';        // z.B. 'https://xxxxxxxx.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImphaWVteGxzdWtqc2tlb3V1ZWtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NzQ4MDksImV4cCI6MjA5OTI1MDgwOX0.u3O1wfnI0g9a8ajfOZI3AHz1g8EtWxdWjact4i7tf5g';   // der "anon public" Key aus Supabase
 
 let sb = null;
 if(SUPABASE_URL && SUPABASE_ANON_KEY && typeof window.supabase !== 'undefined'){
