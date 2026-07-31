@@ -1006,6 +1006,7 @@ function openGameModal(id){
    RENDER: CLUB (Auth, Club-Verwaltung, Club-Dashboard)
    ========================================================= */
 let authState = { mode: 'login' };
+let archivOpen = false;
 
 function rsvpCounts(eventId){
   const rows = cloud.rsvps.filter(r => r.event_id === eventId);
@@ -1041,6 +1042,20 @@ function hallOfFame(){
   return Object.entries(counts)
     .map(([userId, count]) => ({ userId, count, name: memberName(userId) }))
     .sort((a,b) => b.count - a.count);
+}
+
+function clubEventCardHtml(ev, isPast){
+  const counts = rsvpCounts(ev.id);
+  const spieleCount = (ev.spiele||[]).length;
+  const koenigId = koenigOf(ev);
+  return '<div class="card club-event-card '+(isPast?'past':'')+'" data-id="'+ev.id+'" tabindex="0">'
+    + '<div class="stamp">'+(isPast?'📦':'🎳')+'</div>'
+    + '<h3>'+esc(ev.titel || ('Kegelabend am '+formatDateHuman(ev.datum)))+'</h3>'
+    + '<div class="meta-row">📅 '+formatDateHuman(ev.datum)+' · '+esc((ev.uhrzeit||'').slice(0,5))+'</div>'
+    + '<div class="meta-row">📍 '+esc(ev.ort||'Ort offen')+'</div>'
+    + '<div class="meta-row">👥 '+counts.zugesagt+' zugesagt'+(counts.offen?(' · '+counts.offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
+    + (koenigId ? '<div class="meta-row">👑 König: '+esc(memberName(koenigId))+'</div>' : (ev.koenigsspiel_game_id ? '<div class="meta-row" style="color:var(--text-muted);">👑 Königsspiel noch ohne Ergebnis</div>' : ''))
+  + '</div>';
 }
 
 function renderClub(){
@@ -1137,24 +1152,31 @@ function renderClub(){
   + '</div>';
 
   if(cloud.clubTab==='events'){
-    if(cloud.events.length===0){
+    const nowTs = new Date();
+    const upcoming = cloud.events
+      .filter(ev => new Date(ev.datum+'T'+(ev.uhrzeit||'00:00')) >= nowTs)
+      .sort((a,b) => new Date(a.datum+'T'+(a.uhrzeit||'00:00')) - new Date(b.datum+'T'+(b.uhrzeit||'00:00')));
+    const past = cloud.events
+      .filter(ev => new Date(ev.datum+'T'+(ev.uhrzeit||'00:00')) < nowTs)
+      .sort((a,b) => new Date(b.datum+'T'+(b.uhrzeit||'00:00')) - new Date(a.datum+'T'+(a.uhrzeit||'00:00')));
+
+    if(upcoming.length===0 && past.length===0){
       html += emptyState('🎳','Noch kein Kegelabend in diesem Club.','Leg direkt den ersten Abend an – alle Mitglieder sehen ihn live.');
+    } else if(upcoming.length===0){
+      html += '<p style="color:var(--text-muted);font-size:.9rem;">Aktuell nichts geplant – leg einen neuen Abend an.</p>';
     } else {
-      html += cloud.events.map(ev => {
-        const counts = rsvpCounts(ev.id);
-        const spieleCount = (ev.spiele||[]).length;
-        const koenigId = koenigOf(ev);
-        return '<div class="card club-event-card" data-id="'+ev.id+'" tabindex="0">'
-          + '<div class="stamp">🎳</div>'
-          + '<h3>'+esc(ev.titel || ('Kegelabend am '+formatDateHuman(ev.datum)))+'</h3>'
-          + '<div class="meta-row">📅 '+formatDateHuman(ev.datum)+' · '+esc((ev.uhrzeit||'').slice(0,5))+'</div>'
-          + '<div class="meta-row">📍 '+esc(ev.ort||'Ort offen')+'</div>'
-          + '<div class="meta-row">👥 '+counts.zugesagt+' zugesagt'+(counts.offen?(' · '+counts.offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
-          + (koenigId ? '<div class="meta-row">👑 König: '+esc(memberName(koenigId))+'</div>' : (ev.koenigsspiel_game_id ? '<div class="meta-row" style="color:var(--text-muted);">👑 Königsspiel noch ohne Ergebnis</div>' : ''))
-        + '</div>';
-      }).join('');
+      html += upcoming.map(ev => clubEventCardHtml(ev,false)).join('');
     }
     html += '<div class="card dashed" id="add-club-event-card">+ Neuer Kegelabend</div>';
+
+    if(past.length){
+      html += '<button type="button" class="link-btn" id="toggle-archiv" style="margin-top:18px;">'
+        + (archivOpen ? '▾' : '▸') + ' 📦 Archiv (' + past.length + ')'
+      + '</button>';
+      if(archivOpen){
+        html += '<div style="margin-top:8px;">' + past.map(ev => clubEventCardHtml(ev,true)).join('') + '</div>';
+      }
+    }
   } else if(cloud.clubTab==='games'){
     if(officialGames.length===0){
       html += '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele im globalen Katalog. Ein Admin kann sie im Admin-Bereich anlegen.</p>';
@@ -1211,6 +1233,8 @@ function renderClub(){
     $all('.club-event-card', el).forEach(c => c.addEventListener('click', () => openClubEventModal(c.dataset.id)));
     const addCard = document.getElementById('add-club-event-card');
     if(addCard) addCard.addEventListener('click', () => openClubEventModal(null));
+    const toggleBtn = document.getElementById('toggle-archiv');
+    if(toggleBtn) toggleBtn.addEventListener('click', () => { archivOpen = !archivOpen; renderClub(); });
   } else if(cloud.clubTab==='games'){
     $all('.star-rating', el).forEach(row => {
       $all('button', row).forEach(btn => btn.addEventListener('click', async () => {
