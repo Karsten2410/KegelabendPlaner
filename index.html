@@ -225,6 +225,11 @@
     color:var(--dark);
     font-size:1.6rem;
     font-weight:800;
+    line-height:1;
+    padding:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
     box-shadow:0 4px 12px rgba(0,0,0,.3);
     z-index:11;
   }
@@ -1267,6 +1272,20 @@ function openClubEventModal(id){
   const ev = id ? cloud.events.find(e=>e.id===id) : null;
   let selectedGames = ev ? [...(ev.spiele||[])] : [];
   let koenigGameId = ev ? (ev.koenigsspiel_game_id || null) : null;
+  // Lokale, sofort sichtbare Arbeitskopie der Ergebnisse je Spiel:
+  // { [gameId]: [userId, userId, ...] } in Platzierungsreihenfolge (Index 0 = Platz 1).
+  // Wird bei jedem Klick SOFORT aktualisiert (optimistisch), das Speichern läuft
+  // im Hintergrund über eine serialisierte Warteschlange, damit schnelles
+  // Hintereinander-Tippen die Reihenfolge nicht durcheinanderbringt.
+  let localResults = {};
+  if(ev){
+    selectedGames.forEach(gid => { localResults[gid] = resultsFor(ev.id, gid).map(r=>r.user_id); });
+  }
+  let writeChain = Promise.resolve();
+  function queueWrite(fn){
+    writeChain = writeChain.then(fn).catch(() => showToast('Änderung konnte nicht gespeichert werden.'));
+    return writeChain;
+  }
 
   function gamesChipsHtml(){
     if(officialGames.length===0) return '<p style="font-size:.85rem;color:var(--text-muted);">Noch keine Spiele im globalen Katalog.</p>';
@@ -1300,28 +1319,27 @@ function openClubEventModal(id){
     if(!g) return '';
     const isKoenig = koenigGameId === gid;
     const participants = confirmedParticipants();
-    const existing = resultsFor(ev.id, gid);
+    const rankedIds = localResults[gid] || [];
     if(isKoenig){
-      const rankedIds = existing.map(r=>r.user_id);
       const pool = participants.filter(p => !rankedIds.includes(p.user_id));
       return '<div class="result-block is-koenig">'
         + '<h4>👑 Königsspiel: '+esc(g.name)+'</h4>'
         + (participants.length===0 ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>' : '')
-        + (existing.length ? '<div class="rank-list">' + existing.map((r,i) =>
-            '<div class="rank-item"><span class="rank-num">'+(i+1)+(i===0?'. 👑':'.')+'</span><span class="rname">'+esc(memberName(r.user_id))+'</span><button type="button" data-unrank="'+gid+'|'+r.user_id+'">✕</button></div>'
+        + (rankedIds.length ? '<div class="rank-list">' + rankedIds.map((uid,i) =>
+            '<div class="rank-item"><span class="rank-num">'+(i+1)+(i===0?'. 👑':'.')+'</span><span class="rname">'+esc(memberName(uid))+'</span><button type="button" data-unrank="'+gid+'|'+uid+'">✕</button></div>'
           ).join('') + '</div>' : '')
         + (pool.length ? '<div class="pool-chips">' + pool.map(p =>
             '<button type="button" class="winner-chip" data-rank-add="'+gid+'|'+p.user_id+'">+ '+esc(p.name)+'</button>'
           ).join('') + '</div>' : '')
       + '</div>';
     }
-    const winner = existing.find(r=>r.platz===1);
+    const winnerId = rankedIds[0] || null;
     return '<div class="result-block">'
       + '<h4>'+esc(g.icon)+' '+esc(g.name)+'</h4>'
       + (participants.length===0
           ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>'
           : '<div class="pool-chips">' + participants.map(p =>
-              '<button type="button" class="winner-chip '+(winner&&winner.user_id===p.user_id?'selected':'')+'" data-winner="'+gid+'|'+p.user_id+'">'+esc(p.name)+'</button>'
+              '<button type="button" class="winner-chip '+(winnerId===p.user_id?'selected':'')+'" data-winner="'+gid+'|'+p.user_id+'">'+esc(p.name)+'</button>'
             ).join('') + '</div>')
     + '</div>';
   }
@@ -1388,67 +1406,64 @@ function openClubEventModal(id){
   async function setKoenigGame(gid){
     const newVal = koenigGameId === gid ? null : gid;
     koenigGameId = newVal;
+    refreshGamesBlocks();
     if(ev){
-      try{
-        await sb.from('club_events').update({ koenigsspiel_game_id: newVal }).eq('id', ev.id);
+      queueWrite(async () => {
+        const { error } = await sb.from('club_events').update({ koenigsspiel_game_id: newVal }).eq('id', ev.id);
+        if(error) throw error;
         ev.koenigsspiel_game_id = newVal;
         const idx = cloud.events.findIndex(e=>e.id===ev.id);
         if(idx>=0) cloud.events[idx].koenigsspiel_game_id = newVal;
-      }catch(e){ showToast('Konnte Königsspiel nicht speichern.'); }
+        renderClub();
+      });
     }
-    refreshGamesBlocks();
   }
-  async function addRank(gid, userId){
-    const nextPlatz = resultsFor(ev.id, gid).length + 1;
-    try{
-      const { error } = await sb.from('club_event_results').upsert(
-        { event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: nextPlatz, updated_by: cloud.session.user.id },
-        { onConflict: 'event_id,game_id,user_id' }
-      );
-      if(error) throw error;
-      cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: nextPlatz });
-      refreshGamesBlocks();
-      renderClub();
-    }catch(e){ showToast('Konnte Platzierung nicht speichern.'); }
-  }
-  async function removeRank(gid, userId){
-    try{
-      await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid).eq('user_id', userId);
-      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid && r.user_id===userId));
-      // verbleibende Plätze lückenlos neu nummerieren (1,2,3,...)
-      const remaining = resultsFor(ev.id, gid);
-      for(let i=0;i<remaining.length;i++){
-        const wantedPlatz = i+1;
-        if(remaining[i].platz !== wantedPlatz){
-          remaining[i].platz = wantedPlatz;
-          await sb.from('club_event_results').update({ platz: wantedPlatz }).eq('event_id', ev.id).eq('game_id', gid).eq('user_id', remaining[i].user_id);
-        }
-      }
-      refreshGamesBlocks();
-      renderClub();
-    }catch(e){ showToast('Konnte Platzierung nicht entfernen.'); }
-  }
-  async function setWinner(gid, userId){
-    const current = resultsFor(ev.id, gid).find(r=>r.platz===1);
-    try{
+  // Schreibt den kompletten lokalen Stand für EIN Spiel in einem Rutsch in die
+  // Datenbank (alle alten Zeilen löschen, dann alle aktuellen neu anlegen).
+  // Das macht jede einzelne Speicherung in sich konsistent - es gibt keinen
+  // Zwischenzustand, den ein zweiter, fast gleichzeitiger Klick durcheinander
+  // bringen könnte, weil alle Schreibvorgänge über writeChain nacheinander
+  // (nie überlappend) ausgeführt werden.
+  function syncResultsForGame(gid){
+    const ids = [...(localResults[gid] || [])];
+    queueWrite(async () => {
       await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid);
-      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
-      if(!current || current.user_id !== userId){
-        const { error } = await sb.from('club_event_results').insert(
-          { event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: 1, updated_by: cloud.session.user.id }
-        );
+      if(ids.length){
+        const rows = ids.map((uid,i) => ({
+          event_id: ev.id, club_id: cloud.activeClubId, game_id: gid,
+          user_id: uid, platz: i+1, updated_by: cloud.session.user.id
+        }));
+        const { error } = await sb.from('club_event_results').insert(rows);
         if(error) throw error;
-        cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: userId, platz: 1 });
       }
-      refreshGamesBlocks();
+      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
+      ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
       renderClub();
-    }catch(e){ showToast('Konnte Sieger nicht speichern.'); }
+    });
+  }
+  function addRank(gid, userId){
+    localResults[gid] = localResults[gid] || [];
+    if(!localResults[gid].includes(userId)) localResults[gid].push(userId);
+    refreshGamesBlocks();
+    syncResultsForGame(gid);
+  }
+  function removeRank(gid, userId){
+    localResults[gid] = (localResults[gid] || []).filter(id => id!==userId);
+    refreshGamesBlocks();
+    syncResultsForGame(gid);
+  }
+  function setWinner(gid, userId){
+    const current = (localResults[gid] || [])[0] || null;
+    localResults[gid] = (current === userId) ? [] : [userId];
+    refreshGamesBlocks();
+    syncResultsForGame(gid);
   }
   function attachHandlers(){
     $all('.chip[data-game]').forEach(chip => chip.addEventListener('click', () => {
       const gid = chip.dataset.game;
       const idx = selectedGames.indexOf(gid);
       if(idx>=0) selectedGames.splice(idx,1); else selectedGames.push(gid);
+      if(!localResults[gid]) localResults[gid] = [];
       refreshGamesBlocks();
     }));
     $all('[data-order-up]').forEach(b => b.addEventListener('click', () => {
@@ -1549,10 +1564,12 @@ function openClubEventModal(id){
     const list = document.getElementById('ce-rsvp-list');
     if(ev && list) list.innerHTML = rsvpListHtml();
   };
-  refreshOpenEventResultsIfAny = function(){
-    const resultsEl = document.getElementById('ce-results');
-    if(ev && resultsEl) resultsEl.innerHTML = resultsBlockHtml();
-  };
+  // Absichtlich kein Auto-Refresh der Ergebnisse aus Realtime-Events mehr,
+  // solange dieses Modal offen ist: der lokale Stand (localResults) ist
+  // hier die "Quelle der Wahrheit", während man aktiv Platzierungen einträgt.
+  // Andere Ansichten (Eventliste, Bestenliste) aktualisieren sich unabhängig
+  // davon trotzdem live über cloud.results.
+  refreshOpenEventResultsIfAny = function(){};
 }
 
 /* =========================================================
