@@ -660,7 +660,8 @@ const cloud = {
   rsvps: [],                 // alle RSVPs des aktiven Clubs (über alle Events)
   results: [],                // alle Ergebnisse/Platzierungen (Königsspiel + normale Spiele)
   ratings: {},               // { game_id: {stars, updated_by} } für aktiven Club
-  clubTab: 'events'          // Unter-Tab innerhalb "Club": events | games | members | hof
+  clubTab: 'events',          // Unter-Tab innerhalb "Club": events | games | members | hof
+  passwordRecovery: false     // true, während der Nutzer über den Mail-Link ein neues Passwort setzt
 };
 let officialGames = loadData('kegel_official_games_v1', []);
 let realtimeChannel = null;
@@ -697,6 +698,14 @@ async function signIn(email, password){
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
   if(error) throw error;
   return data;
+}
+async function requestPasswordReset(email){
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname });
+  if(error) throw error;
+}
+async function setNewPassword(newPassword){
+  const { error } = await sb.auth.updateUser({ password: newPassword });
+  if(error) throw error;
 }
 async function signOut(){
   await sb.auth.signOut();
@@ -848,6 +857,7 @@ async function initCloud(){
   }
   sb.auth.onAuthStateChange(async (event, session) => {
     cloud.session = session;
+    if(event === 'PASSWORD_RECOVERY'){ cloud.passwordRecovery = true; }
     if(isLoggedIn()){
       await loadProfile();
       await loadMyClubs();
@@ -1072,8 +1082,53 @@ function renderClub(){
       + 'Führe dazu <code>supabase-schema.sql</code> in deinem Supabase-Projekt aus (SQL Editor) und trage anschließend deine <code>SUPABASE_URL</code> und <code>SUPABASE_ANON_KEY</code> im Code dieser Datei ein.</div>';
     return;
   }
+  if(cloud.passwordRecovery){
+    document.getElementById('subtitle').textContent = 'Neues Passwort festlegen';
+    el.innerHTML = '<h2 class="section-title">Neues Passwort festlegen</h2>'
+      + '<p style="font-size:.85rem;color:var(--text-muted);margin-top:-6px;">Du kommst über den Link aus deiner E-Mail. Vergib jetzt ein neues Passwort für dein Konto.</p>'
+      + '<div class="field"><label>Neues Passwort</label><input type="password" id="pw-new" autocomplete="new-password"></div>'
+      + '<div class="field"><label>Neues Passwort wiederholen</label><input type="password" id="pw-new-repeat" autocomplete="new-password"></div>'
+      + '<button class="btn btn-primary btn-block" id="pw-new-submit">Passwort speichern</button>'
+      + '<p id="pw-new-msg" style="font-size:.85rem;margin-top:10px;"></p>';
+    document.getElementById('pw-new-submit').addEventListener('click', async () => {
+      const pw1 = document.getElementById('pw-new').value;
+      const pw2 = document.getElementById('pw-new-repeat').value;
+      const msg = document.getElementById('pw-new-msg');
+      msg.textContent = '';
+      if(!pw1 || pw1.length < 6){ msg.style.color='var(--alert)'; msg.textContent = 'Bitte mindestens 6 Zeichen verwenden.'; return; }
+      if(pw1 !== pw2){ msg.style.color='var(--alert)'; msg.textContent = 'Die beiden Passwörter stimmen nicht überein.'; return; }
+      try{
+        await setNewPassword(pw1);
+        cloud.passwordRecovery = false;
+        showToast('Passwort aktualisiert 🔒');
+        renderClub();
+      }catch(e){ msg.style.color='var(--alert)'; msg.textContent = e.message || 'Etwas ist schiefgelaufen.'; }
+    });
+    return;
+  }
   if(!isLoggedIn()){
     document.getElementById('subtitle').textContent = 'Melde dich an, um deinen Club zu sehen';
+    if(authState.mode === 'forgot'){
+      el.innerHTML = '<h2 class="section-title">Passwort vergessen</h2>'
+        + '<p style="font-size:.85rem;color:var(--text-muted);margin-top:-6px;">Gib deine E-Mail-Adresse ein, wir schicken dir einen Link zum Zurücksetzen.</p>'
+        + '<div class="field"><label>E-Mail</label><input type="text" id="forgot-email" autocomplete="email" value="'+esc(authState.lastEmail||'')+'"></div>'
+        + '<button class="btn btn-primary btn-block" id="forgot-submit">Reset-Link senden</button>'
+        + '<button class="link-btn" id="forgot-back" style="margin-top:12px;">← Zurück zum Login</button>'
+        + '<p id="forgot-msg" style="font-size:.85rem;margin-top:10px;"></p>';
+      document.getElementById('forgot-back').addEventListener('click', () => { authState.mode='login'; renderClub(); });
+      document.getElementById('forgot-submit').addEventListener('click', async () => {
+        const email = document.getElementById('forgot-email').value.trim();
+        const msg = document.getElementById('forgot-msg');
+        msg.textContent = '';
+        if(!email){ msg.style.color='var(--alert)'; msg.textContent = 'Bitte E-Mail-Adresse eingeben.'; return; }
+        try{
+          await requestPasswordReset(email);
+          msg.style.color = 'var(--ok)';
+          msg.textContent = 'E-Mail verschickt! Schau in dein Postfach und klick auf den Link, um ein neues Passwort zu vergeben.';
+        }catch(e){ msg.style.color='var(--alert)'; msg.textContent = e.message || 'Etwas ist schiefgelaufen.'; }
+      });
+      return;
+    }
     el.innerHTML = '<h2 class="section-title">Anmelden</h2>'
       + '<div class="auth-tabs">'
         + '<button data-authtab="login" class="'+(authState.mode==='login'?'active':'')+'">Login</button>'
@@ -1083,8 +1138,15 @@ function renderClub(){
       + '<div class="field"><label>E-Mail</label><input type="text" id="auth-email" autocomplete="email"></div>'
       + '<div class="field"><label>Passwort</label><input type="password" id="auth-pw" autocomplete="'+(authState.mode==='register'?'new-password':'current-password')+'"></div>'
       + '<button class="btn btn-primary btn-block" id="auth-submit">'+(authState.mode==='register'?'Registrieren':'Einloggen')+'</button>'
+      + (authState.mode==='login' ? '<button class="link-btn" id="auth-forgot" style="margin-top:10px;">Passwort vergessen?</button>' : '')
       + '<p id="auth-msg" style="font-size:.85rem;margin-top:10px;"></p>';
     $all('[data-authtab]', el).forEach(b => b.addEventListener('click', () => { authState.mode = b.dataset.authtab; renderClub(); }));
+    const forgotLink = document.getElementById('auth-forgot');
+    if(forgotLink) forgotLink.addEventListener('click', () => {
+      authState.lastEmail = (document.getElementById('auth-email').value||'').trim();
+      authState.mode = 'forgot';
+      renderClub();
+    });
     document.getElementById('auth-submit').addEventListener('click', async () => {
       const email = document.getElementById('auth-email').value.trim();
       const pw = document.getElementById('auth-pw').value;
@@ -1320,27 +1382,16 @@ function openClubEventModal(id){
     const isKoenig = koenigGameId === gid;
     const participants = confirmedParticipants();
     const rankedIds = localResults[gid] || [];
-    if(isKoenig){
-      const pool = participants.filter(p => !rankedIds.includes(p.user_id));
-      return '<div class="result-block is-koenig">'
-        + '<h4>👑 Königsspiel: '+esc(g.name)+'</h4>'
-        + (participants.length===0 ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>' : '')
-        + (rankedIds.length ? '<div class="rank-list">' + rankedIds.map((uid,i) =>
-            '<div class="rank-item"><span class="rank-num">'+(i+1)+(i===0?'. 👑':'.')+'</span><span class="rname">'+esc(memberName(uid))+'</span><button type="button" data-unrank="'+gid+'|'+uid+'">✕</button></div>'
-          ).join('') + '</div>' : '')
-        + (pool.length ? '<div class="pool-chips">' + pool.map(p =>
-            '<button type="button" class="winner-chip" data-rank-add="'+gid+'|'+p.user_id+'">+ '+esc(p.name)+'</button>'
-          ).join('') + '</div>' : '')
-      + '</div>';
-    }
-    const winnerId = rankedIds[0] || null;
-    return '<div class="result-block">'
-      + '<h4>'+esc(g.icon)+' '+esc(g.name)+'</h4>'
-      + (participants.length===0
-          ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>'
-          : '<div class="pool-chips">' + participants.map(p =>
-              '<button type="button" class="winner-chip '+(winnerId===p.user_id?'selected':'')+'" data-winner="'+gid+'|'+p.user_id+'">'+esc(p.name)+'</button>'
-            ).join('') + '</div>')
+    const pool = participants.filter(p => !rankedIds.includes(p.user_id));
+    return '<div class="result-block '+(isKoenig?'is-koenig':'')+'">'
+      + '<h4>'+(isKoenig ? '👑 Königsspiel: '+esc(g.name) : esc(g.icon)+' '+esc(g.name))+'</h4>'
+      + (participants.length===0 ? '<p style="font-size:.8rem;color:var(--text-muted);">Noch niemand zugesagt – erst Rückmeldungen sammeln.</p>' : '')
+      + (rankedIds.length ? '<div class="rank-list">' + rankedIds.map((uid,i) =>
+          '<div class="rank-item"><span class="rank-num">'+(i+1)+(isKoenig && i===0?'. 👑':'.')+'</span><span class="rname">'+esc(memberName(uid))+'</span><button type="button" data-unrank="'+gid+'|'+uid+'">✕</button></div>'
+        ).join('') + '</div>' : '')
+      + (pool.length ? '<div class="pool-chips">' + pool.map(p =>
+          '<button type="button" class="winner-chip" data-rank-add="'+gid+'|'+p.user_id+'">+ '+esc(p.name)+'</button>'
+        ).join('') + '</div>' : '')
     + '</div>';
   }
   function resultsBlockHtml(){
@@ -1452,12 +1503,6 @@ function openClubEventModal(id){
     refreshGamesBlocks();
     syncResultsForGame(gid);
   }
-  function setWinner(gid, userId){
-    const current = (localResults[gid] || [])[0] || null;
-    localResults[gid] = (current === userId) ? [] : [userId];
-    refreshGamesBlocks();
-    syncResultsForGame(gid);
-  }
   function attachHandlers(){
     $all('.chip[data-game]').forEach(chip => chip.addEventListener('click', () => {
       const gid = chip.dataset.game;
@@ -1486,10 +1531,6 @@ function openClubEventModal(id){
     $all('[data-unrank]').forEach(b => b.addEventListener('click', () => {
       const [gid, userId] = b.dataset.unrank.split('|');
       removeRank(gid, userId);
-    }));
-    $all('[data-winner]').forEach(b => b.addEventListener('click', () => {
-      const [gid, userId] = b.dataset.winner.split('|');
-      setWinner(gid, userId);
     }));
     $all('[data-mystatus]').forEach(b => b.addEventListener('click', async () => {
       try{
