@@ -515,6 +515,17 @@
   .hof-item:last-child{border-bottom:none;}
   .hof-rank{font-family:var(--font-mono);font-weight:800;width:28px;font-size:1.05rem;color:var(--wood);}
   .hof-count{margin-left:auto;font-family:var(--font-mono);font-weight:700;color:var(--accent-dark);font-size:.9rem;}
+
+  /* ---------- Spiele-Tags ---------- */
+  .tag-badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;}
+  .tag-badge{
+    display:inline-flex;align-items:center;gap:3px;
+    font-size:.72rem;font-weight:700;
+    padding:2px 8px;border-radius:999px;
+    background:rgba(91,58,41,.08);color:var(--wood);
+  }
+  .tag-filter-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+  .tag-filter-row .chip{padding:6px 12px;font-size:.8rem;}
 </style>
 </head>
 <body>
@@ -614,10 +625,10 @@ function showToast(msg){
 /* ---------- Seed data ---------- */
 function seedGames(){
   return [
-    { id:uid(), icon:'🍺', name:'Bierkegeln', beschreibung:'Klassiker: Wer die wenigsten Kegel trifft, gibt eine Runde aus.', minSpieler:2, maxSpieler:12, dauer:20 },
-    { id:uid(), icon:'🏆', name:'König des Abends', beschreibung:'Turnier über mehrere Runden, am Ende gibt es einen Gesamtsieger.', minSpieler:4, maxSpieler:10, dauer:45 },
-    { id:uid(), icon:'🎯', name:'Wurfrunden-Kegeln', beschreibung:'Jeder wirft reihum, Punkte werden pro Runde addiert.', minSpieler:2, maxSpieler:8, dauer:15 },
-    { id:uid(), icon:'🙈', name:'Blindkegeln', beschreibung:'Mit verbundenen Augen werfen – sorgt garantiert für Lacher.', minSpieler:2, maxSpieler:8, dauer:15 }
+    { id:uid(), icon:'🍺', name:'Bierkegeln', beschreibung:'Klassiker: Wer die wenigsten Kegel trifft, gibt eine Runde aus.', minSpieler:2, maxSpieler:12, dauer:20, tags:['Gruppenspiel','Glück'] },
+    { id:uid(), icon:'🏆', name:'König des Abends', beschreibung:'Turnier über mehrere Runden, am Ende gibt es einen Gesamtsieger.', minSpieler:4, maxSpieler:10, dauer:45, tags:['Präzision','Risiko'] },
+    { id:uid(), icon:'🎯', name:'Wurfrunden-Kegeln', beschreibung:'Jeder wirft reihum, Punkte werden pro Runde addiert.', minSpieler:2, maxSpieler:8, dauer:15, tags:['Präzision'] },
+    { id:uid(), icon:'🙈', name:'Blindkegeln', beschreibung:'Mit verbundenen Augen werfen – sorgt garantiert für Lacher.', minSpieler:2, maxSpieler:8, dauer:15, tags:['Glück','Risiko'] }
   ];
 }
 
@@ -650,6 +661,12 @@ if(SUPABASE_URL && SUPABASE_ANON_KEY && typeof window.supabase !== 'undefined'){
 }
 const cloudEnabled = !!sb;
 
+// Supabase feuert das "PASSWORD_RECOVERY"-Event teils unzuverlässig (bekanntes
+// Verhalten: manchmal kommt stattdessen einfach "SIGNED_IN"). Deshalb werten
+// wir die URL zusätzlich selbst aus, BEVOR Supabase sie beim Laden verarbeitet
+// und den Hash entfernt - das ist die verlässlichere Erkennung.
+const urlIndicatesRecovery = /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search);
+
 const cloud = {
   session: null,
   profile: null,          // { id, display_name, is_admin }
@@ -661,7 +678,7 @@ const cloud = {
   results: [],                // alle Ergebnisse/Platzierungen (Königsspiel + normale Spiele)
   ratings: {},               // { game_id: {stars, updated_by} } für aktiven Club
   clubTab: 'events',          // Unter-Tab innerhalb "Club": events | games | members | hof
-  passwordRecovery: false     // true, während der Nutzer über den Mail-Link ein neues Passwort setzt
+  passwordRecovery: urlIndicatesRecovery  // true, während der Nutzer über den Mail-Link ein neues Passwort setzt
 };
 let officialGames = loadData('kegel_official_games_v1', []);
 let realtimeChannel = null;
@@ -678,7 +695,7 @@ async function refreshOfficialGames(){
     if(error) throw error;
     officialGames = (data||[]).map(g => ({
       id: g.id, icon: g.icon, name: g.name, beschreibung: g.beschreibung,
-      minSpieler: g.min_spieler, maxSpieler: g.max_spieler, dauer: g.dauer
+      minSpieler: g.min_spieler, maxSpieler: g.max_spieler, dauer: g.dauer, tags: g.tags || []
     }));
     saveData('kegel_official_games_v1', officialGames);
     if(state.tab==='games') renderGames();
@@ -848,13 +865,6 @@ let refreshOpenEventResultsIfAny = function(){};
 /* ---------- Supabase-Session verdrahten ---------- */
 async function initCloud(){
   if(!cloudEnabled) return;
-  const { data } = await sb.auth.getSession();
-  cloud.session = data.session;
-  if(isLoggedIn()){
-    await loadProfile();
-    await loadMyClubs();
-    await loadActiveClubData();
-  }
   sb.auth.onAuthStateChange(async (event, session) => {
     cloud.session = session;
     if(event === 'PASSWORD_RECOVERY'){ cloud.passwordRecovery = true; }
@@ -889,6 +899,14 @@ function renderNavForRole(){
 
 /* ---------- Emoji options ---------- */
 const GAME_EMOJIS = ['🎳','🍺','🏆','🎯','🔥','🎲','⭐','🥨','🙈','🍀'];
+const GAME_TAGS = [
+  { id:'Gruppenspiel', icon:'👥' },
+  { id:'Präzision', icon:'🎯' },
+  { id:'Glück', icon:'🍀' },
+  { id:'Bilderkegeln', icon:'🖼️' },
+  { id:'Risiko', icon:'🔥' }
+];
+function tagIcon(tag){ const t = GAME_TAGS.find(x=>x.id===tag); return t ? t.icon : '🏷️'; }
 
 /* =========================================================
    Hilfsfunktion: leerer Zustand (von mehreren Tabs genutzt)
@@ -900,14 +918,27 @@ function emptyState(emoji, title, sub){
 /* =========================================================
    RENDER: GAMES
    ========================================================= */
+let soloTagFilter = null;
 function renderGames(){
   const el = document.getElementById('view-games');
   let html = '';
 
+  const allTagsPresent = new Set();
+  officialGames.forEach(g => (g.tags||[]).forEach(t=>allTagsPresent.add(t)));
+  state.games.forEach(g => (g.tags||[]).forEach(t=>allTagsPresent.add(t)));
+  if(allTagsPresent.size){
+    html += '<div class="tag-filter-row">' + GAME_TAGS.filter(t=>allTagsPresent.has(t.id)).map(t =>
+        '<button type="button" class="chip '+(soloTagFilter===t.id?'selected':'')+'" data-tagfilter="'+t.id+'">'+t.icon+' '+t.id+'</button>'
+      ).join('') + '</div>';
+  }
+
+  const officialFiltered = soloTagFilter ? officialGames.filter(g=>(g.tags||[]).includes(soloTagFilter)) : officialGames;
+  const localFiltered = soloTagFilter ? state.games.filter(g=>(g.tags||[]).includes(soloTagFilter)) : state.games;
+
   if(officialGames.length){
     html += '<h2 class="section-title">⭐ Offizielle Spiele</h2>';
     html += '<p style="font-size:.82rem;color:var(--text-muted);margin:-6px 0 10px;">Zentral gepflegt, automatisch synchronisiert – nur lesbar.</p>';
-    html += officialGames.map(g => gameCard(g, true)).join('');
+    html += officialFiltered.length ? officialFiltered.map(g => gameCard(g, true)).join('') : '<p style="font-size:.82rem;color:var(--text-muted);">Kein offizielles Spiel mit diesem Tag.</p>';
   } else if(cloudEnabled){
     html += '<p style="font-size:.82rem;color:var(--text-muted);">⭐ Offizielle Spiele werden geladen, sobald du online bist...</p>';
   }
@@ -915,12 +946,18 @@ function renderGames(){
   html += '<h2 class="section-title">Eigener Spiele-Bestand</h2>';
   if(state.games.length === 0){
     html += emptyState('📋','Kein eigenes Spiel im Bestand.','Leg dein erstes Kegel-Spiel an.');
+  } else if(localFiltered.length === 0){
+    html += '<p style="font-size:.82rem;color:var(--text-muted);">Kein eigenes Spiel mit diesem Tag.</p>';
   } else {
-    html += state.games.map(g => gameCard(g, false)).join('');
+    html += localFiltered.map(g => gameCard(g, false)).join('');
   }
   html += '<div class="card dashed" id="add-game-card">+ Neues Spiel</div>';
   el.innerHTML = html;
 
+  $all('[data-tagfilter]', el).forEach(b => b.addEventListener('click', () => {
+    soloTagFilter = soloTagFilter === b.dataset.tagfilter ? null : b.dataset.tagfilter;
+    renderGames();
+  }));
   $all('.game-card:not(.official)', el).forEach(c => c.addEventListener('click', () => openGameModal(c.dataset.id)));
   const addCard = document.getElementById('add-game-card');
   if(addCard) addCard.addEventListener('click', () => openGameModal(null));
@@ -931,6 +968,7 @@ function gameCard(g, isOfficial){
     + '<h3>'+esc(g.name)+(isOfficial?'<span class="badge">Offiziell</span>':'')+'</h3>'
     + (g.beschreibung ? '<p style="margin:4px 0;font-size:.88rem;color:var(--text-muted);">'+esc(g.beschreibung)+'</p>' : '')
     + '<div class="meta-row">👥 '+g.minSpieler+'–'+g.maxSpieler+' Spieler · ⏱ ca. '+g.dauer+' Min.</div>'
+    + ((g.tags && g.tags.length) ? '<div class="tag-badges">' + g.tags.map(t => '<span class="tag-badge">'+tagIcon(t)+' '+esc(t)+'</span>').join('') + '</div>' : '')
     + '</div>';
 }
 
@@ -958,6 +996,10 @@ function openGameModal(id){
   const emojiRow = GAME_EMOJIS.map(e =>
     '<button type="button" class="emoji-opt '+(game && game.icon===e ? 'selected':'')+'" data-emoji="'+e+'">'+e+'</button>'
   ).join('');
+  let selectedTags = game ? [...(game.tags||[])] : [];
+  const tagsRow = () => GAME_TAGS.map(t =>
+    '<button type="button" class="chip tag-opt '+(selectedTags.includes(t.id)?'selected':'')+'" data-tag="'+t.id+'">'+t.icon+' '+t.id+'</button>'
+  ).join('');
 
   openModal(
     '<h2>'+(game?'Spiel bearbeiten':'Neues Spiel')+'</h2>'
@@ -969,6 +1011,7 @@ function openGameModal(id){
       + '<div class="field"><label>Max. Spieler</label><input type="number" id="g-max" min="1" value="'+(game?game.maxSpieler:8)+'"></div>'
     + '</div>'
     + '<div class="field"><label>Dauer (Minuten)</label><input type="number" id="g-dauer" min="1" value="'+(game?game.dauer:20)+'"></div>'
+    + '<div class="field"><label>Tags</label><div class="chip-row" id="g-tags">'+tagsRow()+'</div></div>'
     + '<div class="modal-actions">'
       + '<button class="btn btn-primary" id="g-save">Speichern</button>'
       + (game ? '<button class="btn btn-alert" id="g-delete">Löschen</button>' : '')
@@ -983,6 +1026,13 @@ function openGameModal(id){
   }));
   if(!game){ $all('.emoji-opt')[0].classList.add('selected'); }
 
+  $all('.tag-opt').forEach(btn => btn.addEventListener('click', () => {
+    const tag = btn.dataset.tag;
+    if(selectedTags.includes(tag)) selectedTags = selectedTags.filter(t=>t!==tag);
+    else selectedTags.push(tag);
+    btn.classList.toggle('selected');
+  }));
+
   document.getElementById('g-save').addEventListener('click', () => {
     const name = document.getElementById('g-name').value.trim();
     if(!name){ showToast('Bitte einen Namen eintragen.'); return; }
@@ -993,7 +1043,8 @@ function openGameModal(id){
       beschreibung: document.getElementById('g-desc').value.trim(),
       minSpieler: parseInt(document.getElementById('g-min').value,10) || 1,
       maxSpieler: parseInt(document.getElementById('g-max').value,10) || 1,
-      dauer: parseInt(document.getElementById('g-dauer').value,10) || 10
+      dauer: parseInt(document.getElementById('g-dauer').value,10) || 10,
+      tags: selectedTags
     };
     if(game){
       const idx = state.games.findIndex(g=>g.id===game.id);
@@ -1100,6 +1151,7 @@ function renderClub(){
       try{
         await setNewPassword(pw1);
         cloud.passwordRecovery = false;
+        history.replaceState(null, '', window.location.pathname);
         showToast('Passwort aktualisiert 🔒');
         renderClub();
       }catch(e){ msg.style.color='var(--alert)'; msg.textContent = e.message || 'Etwas ist schiefgelaufen.'; }
@@ -1257,6 +1309,7 @@ function renderClub(){
             + [1,2,3,4,5].map(n => '<button type="button" data-star="'+n+'" class="'+(n<=stars?'filled':'')+'">★</button>').join('')
           + '</div></div>'
           + (g.beschreibung ? '<p style="margin:6px 0 0;font-size:.85rem;color:var(--text-muted);">'+esc(g.beschreibung)+'</p>' : '')
+          + ((g.tags && g.tags.length) ? '<div class="tag-badges">' + g.tags.map(t => '<span class="tag-badge">'+tagIcon(t)+' '+esc(t)+'</span>').join('') + '</div>' : '')
         + '</div>';
       }).join('');
     }
@@ -1638,6 +1691,10 @@ function openAdminGameModal(id){
   const emojiRow = GAME_EMOJIS.map(e =>
     '<button type="button" class="emoji-opt '+(game && game.icon===e ? 'selected':'')+'" data-emoji="'+e+'">'+e+'</button>'
   ).join('');
+  let selectedTags = game ? [...(game.tags||[])] : [];
+  const tagsRow = () => GAME_TAGS.map(t =>
+    '<button type="button" class="chip tag-opt '+(selectedTags.includes(t.id)?'selected':'')+'" data-tag="'+t.id+'">'+t.icon+' '+t.id+'</button>'
+  ).join('');
   openModal(
     '<h2>'+(game?'Offizielles Spiel bearbeiten':'Neues offizielles Spiel')+'</h2>'
     + '<div class="field"><label>Icon</label><div class="emoji-pick">'+emojiRow+'</div></div>'
@@ -1648,6 +1705,7 @@ function openAdminGameModal(id){
       + '<div class="field"><label>Max. Spieler</label><input type="number" id="ag-max" min="1" value="'+(game?game.maxSpieler:8)+'"></div>'
     + '</div>'
     + '<div class="field"><label>Dauer (Minuten)</label><input type="number" id="ag-dauer" min="1" value="'+(game?game.dauer:20)+'"></div>'
+    + '<div class="field"><label>Tags</label><div class="chip-row" id="ag-tags">'+tagsRow()+'</div></div>'
     + '<div class="modal-actions">'
       + '<button class="btn btn-primary" id="ag-save">Speichern</button>'
       + (game ? '<button class="btn btn-alert" id="ag-delete">Löschen</button>' : '')
@@ -1661,6 +1719,13 @@ function openAdminGameModal(id){
   }));
   if(!game){ $all('.emoji-opt')[0].classList.add('selected'); }
 
+  $all('.tag-opt').forEach(btn => btn.addEventListener('click', () => {
+    const tag = btn.dataset.tag;
+    if(selectedTags.includes(tag)) selectedTags = selectedTags.filter(t=>t!==tag);
+    else selectedTags.push(tag);
+    btn.classList.toggle('selected');
+  }));
+
   document.getElementById('ag-save').addEventListener('click', async () => {
     const name = document.getElementById('ag-name').value.trim();
     if(!name){ showToast('Bitte einen Namen eintragen.'); return; }
@@ -1670,7 +1735,8 @@ function openAdminGameModal(id){
       beschreibung: document.getElementById('ag-desc').value.trim(),
       min_spieler: parseInt(document.getElementById('ag-min').value,10) || 1,
       max_spieler: parseInt(document.getElementById('ag-max').value,10) || 1,
-      dauer: parseInt(document.getElementById('ag-dauer').value,10) || 10
+      dauer: parseInt(document.getElementById('ag-dauer').value,10) || 10,
+      tags: selectedTags
     };
     try{
       if(game){
