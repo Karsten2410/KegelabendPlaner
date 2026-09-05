@@ -276,7 +276,7 @@
   .modal h2{margin:0 0 16px;font-size:1.15rem;font-weight:800;text-transform:uppercase;letter-spacing:.03em;color:var(--dark);}
   .field{margin-bottom:14px;}
   .field label{display:block;font-size:.8rem;font-weight:700;color:var(--wood);margin-bottom:5px;text-transform:uppercase;letter-spacing:.03em;}
-  .field input[type=text], .field input[type=date], .field input[type=time], .field input[type=number], .field textarea{
+  .field input[type=text], .field input[type=date], .field input[type=number], .field textarea, .field select{
     width:100%;
     padding:10px 12px;
     border-radius:10px;
@@ -289,6 +289,9 @@
   .field textarea{resize:vertical;min-height:60px;}
   .two-col{display:flex;gap:10px;}
   .two-col .field{flex:1;}
+  .time-select{display:flex;align-items:center;gap:6px;}
+  .time-select select{flex:1;font-family:var(--font-mono);text-align:center;}
+  .time-select .colon{font-weight:800;color:var(--wood);}
   .modal-actions{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap;}
   .modal-actions .btn{flex:1;min-width:110px;}
   .modal-close{
@@ -393,6 +396,21 @@
   .badge.outline{background:transparent;border:1.5px solid var(--wood);color:var(--wood);}
   .badge.adminbadge{background:var(--alert);color:#fff;}
 
+  .offline-banner{
+    background:rgba(162,62,51,.1);
+    border:1.5px solid var(--alert);
+    color:var(--alert);
+    border-radius:12px;
+    padding:10px 14px;
+    font-size:.82rem;
+    margin-bottom:14px;
+    line-height:1.4;
+  }
+  .offline-banner.syncing{
+    background:rgba(217,164,65,.12);
+    border-color:var(--accent-dark);
+    color:var(--wood);
+  }
   .setup-notice{
     background:var(--surface);
     border:2px dashed var(--wood);
@@ -604,6 +622,29 @@ function formatDateHuman(dateStr){
   if(isNaN(d)) return dateStr;
   return d.toLocaleDateString('de-DE', { weekday:'short', day:'2-digit', month:'2-digit', year:'numeric' });
 }
+/* Eigene Zeitauswahl (Stunde/Minute per <select>) statt native type="time"-
+   Eingabe: manche Handy-Browser rendern den nativen Zeit-Picker fehlerhaft
+   (Bedienelemente ragen aus dem Popup heraus). Mit eigenen Dropdowns haben
+   wir volle Kontrolle über die Darstellung, unabhängig vom Gerät. */
+function timeSelectHtml(id, value){
+  const parts = (value || '20:00').split(':');
+  const h = parseInt(parts[0], 10) || 0;
+  const m = parseInt(parts[1], 10) || 0;
+  const nearestQuarter = [0,15,30,45].reduce((a,b) => Math.abs(b-m) < Math.abs(a-m) ? b : a, 0);
+  const hourOpts = Array.from({length:24}, (_,i) => '<option value="'+i+'" '+(i===h?'selected':'')+'>'+String(i).padStart(2,'0')+'</option>').join('');
+  const minOpts = [0,15,30,45].map(mm => '<option value="'+mm+'" '+(mm===nearestQuarter?'selected':'')+'>'+String(mm).padStart(2,'0')+'</option>').join('');
+  return '<div class="time-select">'
+    + '<select id="'+id+'-h">'+hourOpts+'</select>'
+    + '<span class="colon">:</span>'
+    + '<select id="'+id+'-m">'+minOpts+'</select>'
+  + '</div>';
+}
+function readTimeSelect(id){
+  const h = document.getElementById(id+'-h');
+  const m = document.getElementById(id+'-m');
+  if(!h || !m) return '20:00';
+  return String(h.value).padStart(2,'0') + ':' + String(m.value).padStart(2,'0');
+}
 function nameToColor(name){
   const palette = ['#1E3B2C','#5B3A29','#A23E33','#B8842E','#3F6B4A','#8a5a3b'];
   let h = 0;
@@ -678,7 +719,8 @@ const cloud = {
   results: [],                // alle Ergebnisse/Platzierungen (Königsspiel + normale Spiele)
   ratings: {},               // { game_id: {stars, updated_by} } für aktiven Club
   clubTab: 'events',          // Unter-Tab innerhalb "Club": events | games | members | hof
-  passwordRecovery: urlIndicatesRecovery  // true, während der Nutzer über den Mail-Link ein neues Passwort setzt
+  passwordRecovery: urlIndicatesRecovery, // true, während der Nutzer über den Mail-Link ein neues Passwort setzt
+  offline: false          // true, wenn der letzte Ladeversuch der Club-Daten an fehlendem Netz gescheitert ist
 };
 let officialGames = loadData('kegel_official_games_v1', []);
 let realtimeChannel = null;
@@ -733,8 +775,12 @@ async function signOut(){
 }
 async function loadProfile(){
   if(!isLoggedIn()) return;
-  const { data, error } = await sb.from('profiles').select('*').eq('id', cloud.session.user.id).single();
-  if(!error) cloud.profile = data;
+  try{
+    const { data, error } = await sb.from('profiles').select('*').eq('id', cloud.session.user.id).single();
+    if(!error){ cloud.profile = data; saveData('kegel_profile_cache', data); }
+  }catch(e){
+    cloud.profile = loadData('kegel_profile_cache', cloud.profile);
+  }
 }
 
 /* ---------- Clubs ---------- */
@@ -773,15 +819,21 @@ async function joinClubByCode(code){
 }
 async function loadMyClubs(){
   if(!isLoggedIn()) return;
-  const { data, error } = await sb
-    .from('club_members')
-    .select('role, clubs ( id, name, invite_code, owner_id )')
-    .eq('user_id', cloud.session.user.id);
-  if(error){ cloud.myClubs = []; return; }
-  cloud.myClubs = (data||[]).map(row => ({
-    id: row.clubs.id, name: row.clubs.name, invite_code: row.clubs.invite_code,
-    owner_id: row.clubs.owner_id, role: row.role
-  }));
+  try{
+    const { data, error } = await sb
+      .from('club_members')
+      .select('role, clubs ( id, name, invite_code, owner_id )')
+      .eq('user_id', cloud.session.user.id);
+    if(error) throw error;
+    cloud.myClubs = (data||[]).map(row => ({
+      id: row.clubs.id, name: row.clubs.name, invite_code: row.clubs.invite_code,
+      owner_id: row.clubs.owner_id, role: row.role
+    }));
+    saveData('kegel_myclubs_cache', cloud.myClubs);
+  }catch(e){
+    cloud.myClubs = loadData('kegel_myclubs_cache', cloud.myClubs || []);
+    cloud.offline = true;
+  }
   if(cloud.activeClubId && !cloud.myClubs.find(c=>c.id===cloud.activeClubId)){
     cloud.activeClubId = cloud.myClubs[0] ? cloud.myClubs[0].id : null;
     saveData('kegel_active_club', cloud.activeClubId);
@@ -797,29 +849,118 @@ async function leaveClub(clubId){
   await loadActiveClubData();
 }
 
-/* ---------- Club-Daten laden ---------- */
+/* ---------- Club-Daten laden (mit Offline-Cache-Fallback) ---------- */
+function clubCacheKey(clubId){ return 'kegel_club_cache_'+clubId; }
+function saveClubCache(clubId){
+  saveData(clubCacheKey(clubId), {
+    members: cloud.members, events: cloud.events, rsvps: cloud.rsvps,
+    results: cloud.results, ratings: cloud.ratings
+  });
+}
+function loadClubCache(clubId){
+  return loadData(clubCacheKey(clubId), null);
+}
 async function loadActiveClubData(){
   teardownRealtime();
   const clubId = cloud.activeClubId;
   if(!clubId){ cloud.members=[]; cloud.events=[]; cloud.rsvps=[]; cloud.ratings={}; cloud.results=[]; return; }
 
-  const [membersRes, eventsRes, ratingsRes, rsvpRes, resultsRes] = await Promise.all([
-    sb.from('club_members').select('user_id, role, profiles ( display_name )').eq('club_id', clubId),
-    sb.from('club_events').select('*').eq('club_id', clubId).order('datum', { ascending: true }),
-    sb.from('club_game_ratings').select('*').eq('club_id', clubId),
-    sb.from('club_event_rsvp').select('*').eq('club_id', clubId),
-    sb.from('club_event_results').select('*').eq('club_id', clubId)
-  ]);
-  cloud.members = membersRes.error ? [] : membersRes.data;
-  cloud.events = eventsRes.error ? [] : eventsRes.data;
-  cloud.rsvps = rsvpRes.error ? [] : rsvpRes.data;
-  cloud.results = resultsRes.error ? [] : resultsRes.data;
-  cloud.ratings = {};
-  if(!ratingsRes.error){
-    ratingsRes.data.forEach(r => { cloud.ratings[r.game_id] = r; });
+  try{
+    const [membersRes, eventsRes, ratingsRes, rsvpRes, resultsRes] = await Promise.all([
+      sb.from('club_members').select('user_id, role, profiles ( display_name )').eq('club_id', clubId),
+      sb.from('club_events').select('*').eq('club_id', clubId).order('datum', { ascending: true }),
+      sb.from('club_game_ratings').select('*').eq('club_id', clubId),
+      sb.from('club_event_rsvp').select('*').eq('club_id', clubId),
+      sb.from('club_event_results').select('*').eq('club_id', clubId)
+    ]);
+    cloud.members = membersRes.error ? [] : membersRes.data;
+    cloud.events = eventsRes.error ? [] : eventsRes.data;
+    cloud.rsvps = rsvpRes.error ? [] : rsvpRes.data;
+    cloud.results = resultsRes.error ? [] : resultsRes.data;
+    cloud.ratings = {};
+    if(!ratingsRes.error){
+      ratingsRes.data.forEach(r => { cloud.ratings[r.game_id] = r; });
+    }
+    saveClubCache(clubId);
+    cloud.offline = false;
+    try{ setupRealtime(clubId); }catch(e){ /* Realtime ist ein Nice-to-have, kein Blocker */ }
+  }catch(e){
+    // Keine Verbindung (oder Server nicht erreichbar): letzten bekannten Stand
+    // aus dem lokalen Cache verwenden, statt alles leer zu zeigen ("...").
+    const cached = loadClubCache(clubId);
+    if(cached){
+      cloud.members = cached.members || [];
+      cloud.events = cached.events || [];
+      cloud.rsvps = cached.rsvps || [];
+      cloud.results = cached.results || [];
+      cloud.ratings = cached.ratings || {};
+    }
+    cloud.offline = true;
   }
-  setupRealtime(clubId);
 }
+
+/* =========================================================
+   OFFLINE-WARTESCHLANGE
+   =========================================================
+   Ergebnisse, Bewertungen und Zusagen sind die Dinge, die man
+   typischerweise VOR ORT auf der Kegelbahn einträgt - oft mit
+   schlechtem Empfang im Keller. Statt bei fehlendem Netz einfach
+   zu scheitern, wird die Änderung hier lokal zwischengespeichert
+   und automatisch übertragen, sobald wieder eine Verbindung da ist. */
+const OFFLINE_QUEUE_KEY = 'kegel_offline_queue_v1';
+function loadOfflineQueue(){ return loadData(OFFLINE_QUEUE_KEY, []); }
+function saveOfflineQueue(q){ saveData(OFFLINE_QUEUE_KEY, q); }
+function queueOfflineWrite(op){
+  const q = loadOfflineQueue();
+  q.push(op);
+  saveOfflineQueue(q);
+}
+function pendingOfflineCount(){ return loadOfflineQueue().length; }
+
+async function flushOfflineQueue(){
+  if(!cloudEnabled || !sb) return;
+  let q = loadOfflineQueue();
+  if(q.length === 0) return;
+  const remaining = [];
+  let anySucceeded = false;
+  for(const op of q){
+    try{
+      if(op.type === 'results_sync'){
+        await sb.from('club_event_results').delete().eq('event_id', op.eventId).eq('game_id', op.gameId);
+        if(op.userIds.length){
+          const rows = op.userIds.map((uid,i) => ({
+            event_id: op.eventId, club_id: op.clubId, game_id: op.gameId,
+            user_id: uid, platz: i+1, updated_by: op.updatedBy
+          }));
+          const { error } = await sb.from('club_event_results').insert(rows);
+          if(error) throw error;
+        }
+      } else if(op.type === 'rsvp_upsert'){
+        const { error } = await sb.from('club_event_rsvp').upsert(
+          { event_id: op.eventId, club_id: op.clubId, user_id: op.userId, status: op.status },
+          { onConflict: 'event_id,user_id' }
+        );
+        if(error) throw error;
+      } else if(op.type === 'rating_upsert'){
+        const { error } = await sb.from('club_game_ratings').upsert(
+          { club_id: op.clubId, game_id: op.gameId, stars: op.stars, updated_by: op.updatedBy },
+          { onConflict: 'club_id,game_id' }
+        );
+        if(error) throw error;
+      }
+      anySucceeded = true;
+    }catch(e){
+      remaining.push(op); // bleibt in der Warteschlange, nächster Versuch später
+    }
+  }
+  saveOfflineQueue(remaining);
+  if(anySucceeded){
+    await loadActiveClubData();
+    if(state.tab==='club') renderClub();
+    showToast(remaining.length ? 'Teilweise synchronisiert – Rest folgt' : 'Offline-Änderungen synchronisiert ✅');
+  }
+}
+window.addEventListener('online', flushOfflineQueue);
 
 function teardownRealtime(){
   if(realtimeChannel){ sb.removeChannel(realtimeChannel); realtimeChannel = null; }
@@ -868,19 +1009,24 @@ async function initCloud(){
   sb.auth.onAuthStateChange(async (event, session) => {
     cloud.session = session;
     if(event === 'PASSWORD_RECOVERY'){ cloud.passwordRecovery = true; }
-    if(isLoggedIn()){
-      await loadProfile();
-      await loadMyClubs();
-      await loadActiveClubData();
-    } else {
-      cloud.profile = null; cloud.myClubs = []; cloud.members=[]; cloud.events=[]; cloud.ratings={};
-      teardownRealtime();
-    }
+    try{
+      if(isLoggedIn()){
+        await loadProfile();
+        await loadMyClubs();
+        await loadActiveClubData();
+      } else {
+        cloud.profile = null; cloud.myClubs = []; cloud.members=[]; cloud.events=[]; cloud.ratings={};
+        teardownRealtime();
+      }
+    }catch(e){ /* einzelne load*-Funktionen fangen Offline-Fehler bereits selbst ab;
+                  dieses Netz ist nur für unerwartete Fehler, damit das Rendern
+                  darunter auf keinen Fall ausbleibt. */ }
     renderNavForRole();
     if(state.tab==='club' || state.tab==='admin') renderAll();
   });
   renderNavForRole();
   refreshOfficialGames();
+  flushOfflineQueue();
 }
 function renderNavForRole(){
   const tabbar = document.getElementById('tabbar');
@@ -1257,6 +1403,12 @@ function renderClub(){
     : club.name;
 
   let html = '';
+  const pendingCount = pendingOfflineCount();
+  if(cloud.offline){
+    html += '<div class="offline-banner">📴 Offline – zeigt den letzten bekannten Stand. Änderungen werden übernommen, sobald wieder Internet da ist.</div>';
+  } else if(pendingCount > 0){
+    html += '<div class="offline-banner syncing">🔄 '+pendingCount+' Änderung'+(pendingCount>1?'en':'')+' wird synchronisiert...</div>';
+  }
   if(cloud.myClubs.length > 1){
     html += '<div class="club-switcher"><select id="club-select">'
       + cloud.myClubs.map(c => '<option value="'+c.id+'" '+(c.id===cloud.activeClubId?'selected':'')+'>'+esc(c.name)+'</option>').join('')
@@ -1361,13 +1513,19 @@ function renderClub(){
         const gameId = row.dataset.game;
         const stars = parseInt(btn.dataset.star,10);
         try{
-          await sb.from('club_game_ratings').upsert(
+          const { error } = await sb.from('club_game_ratings').upsert(
             { club_id: cloud.activeClubId, game_id: gameId, stars, updated_by: cloud.session.user.id },
             { onConflict: 'club_id,game_id' }
           );
+          if(error) throw error;
           cloud.ratings[gameId] = { stars };
           renderClub();
-        }catch(e){ showToast('Bewertung konnte nicht gespeichert werden.'); }
+        }catch(e){
+          queueOfflineWrite({ type:'rating_upsert', clubId: cloud.activeClubId, gameId, stars, updatedBy: cloud.session.user.id });
+          cloud.ratings[gameId] = { stars };
+          renderClub();
+          showToast('📴 Offline gespeichert – wird synchronisiert, sobald wieder Internet da ist');
+        }
       }));
     });
   } else {
@@ -1475,7 +1633,7 @@ function openClubEventModal(id){
       + '<div class="field"><label>Titel (optional)</label><input type="text" id="ce-titel" value="'+(ev?esc(ev.titel||''):'')+'" placeholder="z.B. Sommer-Kegeln"></div>'
       + '<div class="two-col">'
         + '<div class="field"><label>Datum</label><input type="date" id="ce-datum" value="'+(ev?ev.datum:'')+'"></div>'
-        + '<div class="field"><label>Uhrzeit</label><input type="time" id="ce-uhrzeit" value="'+(ev?(ev.uhrzeit||'20:00').slice(0,5):'20:00')+'"></div>'
+        + '<div class="field"><label>Uhrzeit</label>'+timeSelectHtml('ce-uhrzeit', ev?(ev.uhrzeit||'20:00'):'20:00')+'</div>'
       + '</div>'
       + '<div class="field"><label>Ort</label><input type="text" id="ce-ort" value="'+(ev?esc(ev.ort||''):'')+'" placeholder="z.B. Kegelbahn Krönchen"></div>'
       + '<div class="field"><label>Notizen</label><textarea id="ce-notizen" placeholder="z.B. Wer bringt was mit?">'+(ev?esc(ev.notizen||''):'')+'</textarea></div>'
@@ -1531,18 +1689,28 @@ function openClubEventModal(id){
   function syncResultsForGame(gid){
     const ids = [...(localResults[gid] || [])];
     queueWrite(async () => {
-      await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid);
-      if(ids.length){
-        const rows = ids.map((uid,i) => ({
-          event_id: ev.id, club_id: cloud.activeClubId, game_id: gid,
-          user_id: uid, platz: i+1, updated_by: cloud.session.user.id
-        }));
-        const { error } = await sb.from('club_event_results').insert(rows);
-        if(error) throw error;
+      try{
+        await sb.from('club_event_results').delete().eq('event_id', ev.id).eq('game_id', gid);
+        if(ids.length){
+          const rows = ids.map((uid,i) => ({
+            event_id: ev.id, club_id: cloud.activeClubId, game_id: gid,
+            user_id: uid, platz: i+1, updated_by: cloud.session.user.id
+          }));
+          const { error } = await sb.from('club_event_results').insert(rows);
+          if(error) throw error;
+        }
+        cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
+        ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
+        renderClub();
+      }catch(e){
+        // Kein Netz (oder Server nicht erreichbar): Änderung trotzdem lokal
+        // übernehmen und für später vormerken, statt sie zu verwerfen.
+        queueOfflineWrite({ type:'results_sync', eventId: ev.id, gameId: gid, clubId: cloud.activeClubId, userIds: ids, updatedBy: cloud.session.user.id });
+        cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
+        ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
+        renderClub();
+        showToast('📴 Offline gespeichert – wird synchronisiert, sobald wieder Internet da ist');
       }
-      cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
-      ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
-      renderClub();
     });
   }
   function addRank(gid, userId){
@@ -1586,16 +1754,25 @@ function openClubEventModal(id){
       removeRank(gid, userId);
     }));
     $all('[data-mystatus]').forEach(b => b.addEventListener('click', async () => {
+      const status = b.dataset.mystatus;
       try{
-        await sb.from('club_event_rsvp').upsert(
-          { event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: b.dataset.mystatus },
+        const { error } = await sb.from('club_event_rsvp').upsert(
+          { event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status },
           { onConflict: 'event_id,user_id' }
         );
+        if(error) throw error;
         const existing = cloud.rsvps.find(r=>r.event_id===ev.id && r.user_id===cloud.session.user.id);
-        if(existing) existing.status = b.dataset.mystatus;
-        else cloud.rsvps.push({ event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: b.dataset.mystatus });
+        if(existing) existing.status = status;
+        else cloud.rsvps.push({ event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status });
         refreshModalBody();
-      }catch(e){ showToast('Konnte Rückmeldung nicht speichern.'); }
+      }catch(e){
+        queueOfflineWrite({ type:'rsvp_upsert', eventId: ev.id, clubId: cloud.activeClubId, userId: cloud.session.user.id, status });
+        const existing = cloud.rsvps.find(r=>r.event_id===ev.id && r.user_id===cloud.session.user.id);
+        if(existing) existing.status = status;
+        else cloud.rsvps.push({ event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status });
+        refreshModalBody();
+        showToast('📴 Offline gespeichert – wird synchronisiert, sobald wieder Internet da ist');
+      }
     }));
     const saveBtn = document.getElementById('ce-save');
     if(saveBtn) saveBtn.addEventListener('click', saveClubEvent);
@@ -1623,7 +1800,7 @@ function openClubEventModal(id){
       club_id: cloud.activeClubId,
       titel: document.getElementById('ce-titel').value.trim(),
       datum,
-      uhrzeit: document.getElementById('ce-uhrzeit').value || '20:00',
+      uhrzeit: readTimeSelect('ce-uhrzeit'),
       ort: document.getElementById('ce-ort').value.trim(),
       notizen: document.getElementById('ce-notizen').value.trim(),
       spiele: selectedGames,
