@@ -1239,6 +1239,15 @@ function resultsFor(eventId, gameId){
     .sort((a,b) => a.platz - b.platz);
 }
 // König eines Abends: platz=1 beim als Königsspiel markierten Spiel
+// Ein Abend gilt erst ab dem NÄCHSTEN Kalendertag als "vergangen" - auch
+// wenn die Startzeit schon verstrichen ist, läuft der Abend ja gerade noch.
+function todayStr(){
+  const n = new Date();
+  return n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0') + '-' + String(n.getDate()).padStart(2,'0');
+}
+function isEventPast(ev){
+  return ev.datum < todayStr();
+}
 function koenigOf(ev){
   if(!ev.koenigsspiel_game_id) return null;
   const winner = resultsFor(ev.id, ev.koenigsspiel_game_id).find(r=>r.platz===1);
@@ -1394,9 +1403,8 @@ function renderClub(){
   const club = activeClub();
   if(!club){ el.innerHTML = '<p>Lade Club...</p>'; return; }
 
-  const now = new Date();
   const upcomingEvents = cloud.events
-    .filter(ev => new Date(ev.datum + 'T' + (ev.uhrzeit||'00:00')) >= now)
+    .filter(ev => !isEventPast(ev))
     .sort((a,b) => new Date(a.datum+'T'+(a.uhrzeit||'00:00')) - new Date(b.datum+'T'+(b.uhrzeit||'00:00')));
   document.getElementById('subtitle').textContent = upcomingEvents[0]
     ? 'Nächster Abend: ' + formatDateHuman(upcomingEvents[0].datum) + ' · ' + (upcomingEvents[0].uhrzeit||'').slice(0,5)
@@ -1423,12 +1431,11 @@ function renderClub(){
   + '</div>';
 
   if(cloud.clubTab==='events'){
-    const nowTs = new Date();
     const upcoming = cloud.events
-      .filter(ev => new Date(ev.datum+'T'+(ev.uhrzeit||'00:00')) >= nowTs)
+      .filter(ev => !isEventPast(ev))
       .sort((a,b) => new Date(a.datum+'T'+(a.uhrzeit||'00:00')) - new Date(b.datum+'T'+(b.uhrzeit||'00:00')));
     const past = cloud.events
-      .filter(ev => new Date(ev.datum+'T'+(ev.uhrzeit||'00:00')) < nowTs)
+      .filter(ev => isEventPast(ev))
       .sort((a,b) => new Date(b.datum+'T'+(b.uhrzeit||'00:00')) - new Date(a.datum+'T'+(a.uhrzeit||'00:00')));
 
     if(upcoming.length===0 && past.length===0){
