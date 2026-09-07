@@ -611,6 +611,15 @@ if(!storageAvailable){
 
 /* ---------- Helpers ---------- */
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+// Echte UUID v4 - wird gebraucht, wenn wir (z.B. offline) einem neuen Datensatz
+// schon vor dem Speichern eine gültige Postgres-UUID mitgeben müssen.
+function genUUID(){
+  if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c==='x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+}
 function $(sel, ctx){ return (ctx||document).querySelector(sel); }
 function $all(sel, ctx){ return Array.from((ctx||document).querySelectorAll(sel)); }
 function esc(str){
@@ -916,6 +925,18 @@ function queueOfflineWrite(op){
   saveOfflineQueue(q);
 }
 function pendingOfflineCount(){ return loadOfflineQueue().length; }
+// Unterscheidet einen echten Netzwerkausfall (z.B. "Failed to fetch", kein
+// Empfang) von einem Fehler, den der Server bewusst zurückgibt (z.B. falsche
+// Berechtigung, ungültige Daten). Nur bei echtem Netzwerkausfall macht es
+// Sinn, die Änderung stillschweigend in die Warteschlange zu legen - ein
+// echter Server-Fehler soll weiterhin sichtbar gemeldet werden, sonst denkt
+// man, es sei gespeichert, obwohl es nie klappen wird.
+function isNetworkError(e){
+  if(!e) return false;
+  if(e instanceof TypeError) return true;
+  if(e.code) return false; // Postgrest/Postgres-Fehler haben immer einen Code
+  return /fetch|network/i.test(e.message || '');
+}
 
 async function flushOfflineQueue(){
   if(!cloudEnabled || !sb) return;
@@ -947,10 +968,31 @@ async function flushOfflineQueue(){
           { onConflict: 'club_id,game_id' }
         );
         if(error) throw error;
+      } else if(op.type === 'event_upsert'){
+        if(op.isNew){
+          const { error } = await sb.from('club_events').insert(op.payload);
+          if(error) throw error;
+        } else {
+          const { error } = await sb.from('club_events').update(op.payload).eq('id', op.eventId);
+          if(error) throw error;
+        }
+      } else if(op.type === 'game_upsert'){
+        if(op.isNew){
+          const { error } = await sb.from('games').insert(op.payload);
+          if(error) throw error;
+        } else {
+          const { error } = await sb.from('games').update(op.payload).eq('id', op.gameId);
+          if(error) throw error;
+        }
+        await refreshOfficialGames();
       }
       anySucceeded = true;
     }catch(e){
-      remaining.push(op); // bleibt in der Warteschlange, nächster Versuch später
+      if(isNetworkError(e)){
+        remaining.push(op); // weiterhin kein Netz - bleibt für den nächsten Versuch in der Warteschlange
+      }
+      // Bei einem echten Server-Fehler (z.B. Berechtigung) wird der Eintrag
+      // verworfen statt endlos erfolglos wiederholt zu werden.
     }
   }
   saveOfflineQueue(remaining);
@@ -1276,6 +1318,7 @@ function clubEventCardHtml(ev, isPast){
     + '<div class="meta-row">📍 '+esc(ev.ort||'Ort offen')+'</div>'
     + '<div class="meta-row">👥 '+counts.zugesagt+' zugesagt'+(counts.offen?(' · '+counts.offen+' offen'):'')+' &nbsp; 📋 '+spieleCount+' Spiele</div>'
     + (koenigId ? '<div class="meta-row">👑 König: '+esc(memberName(koenigId))+'</div>' : (ev.koenigsspiel_game_id ? '<div class="meta-row" style="color:var(--text-muted);">👑 Königsspiel noch ohne Ergebnis</div>' : ''))
+    + (ev.spiele_verantwortlich_id ? '<div class="meta-row">🎯 Spiele aussuchen: '+esc(memberName(ev.spiele_verantwortlich_id))+'</div>' : '')
   + '</div>';
 }
 
@@ -1528,6 +1571,7 @@ function renderClub(){
           cloud.ratings[gameId] = { stars };
           renderClub();
         }catch(e){
+          if(!isNetworkError(e)){ showToast('Bewertung konnte nicht gespeichert werden.'); return; }
           queueOfflineWrite({ type:'rating_upsert', clubId: cloud.activeClubId, gameId, stars, updatedBy: cloud.session.user.id });
           cloud.ratings[gameId] = { stars };
           renderClub();
@@ -1645,6 +1689,10 @@ function openClubEventModal(id){
       + '<div class="field"><label>Ort</label><input type="text" id="ce-ort" value="'+(ev?esc(ev.ort||''):'')+'" placeholder="z.B. Kegelbahn Krönchen"></div>'
       + '<div class="field"><label>Notizen</label><textarea id="ce-notizen" placeholder="z.B. Wer bringt was mit?">'+(ev?esc(ev.notizen||''):'')+'</textarea></div>'
       + '<h2 class="section-title" style="margin-top:22px;">Spiele für den Abend</h2>'
+      + '<div class="field"><label>Wer sucht die Spiele aus?</label><select id="ce-spieleverantwortlich">'
+        + '<option value="">Niemand zugewiesen</option>'
+        + cloud.members.map(m => '<option value="'+m.user_id+'" '+(ev && ev.spiele_verantwortlich_id===m.user_id?'selected':'')+'>'+esc(memberName(m.user_id))+'</option>').join('')
+      + '</select></div>'
       + '<div id="ce-games-chips">'+gamesChipsHtml()+'</div>'
       + '<div id="ce-games-order">'+gamesOrderHtml()+'</div>'
       + (ev ? (
@@ -1710,8 +1758,8 @@ function openClubEventModal(id){
         ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
         renderClub();
       }catch(e){
-        // Kein Netz (oder Server nicht erreichbar): Änderung trotzdem lokal
-        // übernehmen und für später vormerken, statt sie zu verwerfen.
+        if(!isNetworkError(e)){ showToast('Änderung konnte nicht gespeichert werden.'); return; }
+        // Kein Netz: Änderung trotzdem lokal übernehmen und für später vormerken.
         queueOfflineWrite({ type:'results_sync', eventId: ev.id, gameId: gid, clubId: cloud.activeClubId, userIds: ids, updatedBy: cloud.session.user.id });
         cloud.results = cloud.results.filter(r => !(r.event_id===ev.id && r.game_id===gid));
         ids.forEach((uid,i) => cloud.results.push({ event_id: ev.id, club_id: cloud.activeClubId, game_id: gid, user_id: uid, platz: i+1 }));
@@ -1773,6 +1821,7 @@ function openClubEventModal(id){
         else cloud.rsvps.push({ event_id: ev.id, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status });
         refreshModalBody();
       }catch(e){
+        if(!isNetworkError(e)){ showToast('Konnte Rückmeldung nicht speichern.'); return; }
         queueOfflineWrite({ type:'rsvp_upsert', eventId: ev.id, clubId: cloud.activeClubId, userId: cloud.session.user.id, status });
         const existing = cloud.rsvps.find(r=>r.event_id===ev.id && r.user_id===cloud.session.user.id);
         if(existing) existing.status = status;
@@ -1811,29 +1860,49 @@ function openClubEventModal(id){
       ort: document.getElementById('ce-ort').value.trim(),
       notizen: document.getElementById('ce-notizen').value.trim(),
       spiele: selectedGames,
-      koenigsspiel_game_id: koenigGameId
+      koenigsspiel_game_id: koenigGameId,
+      spiele_verantwortlich_id: document.getElementById('ce-spieleverantwortlich').value || null
     };
+    const isNew = !ev;
+    if(isNew){ payload.id = genUUID(); payload.created_by = cloud.session.user.id; }
+    const eventId = isNew ? payload.id : ev.id;
+
     try{
-      let savedId;
-      if(ev){
-        const { error } = await sb.from('club_events').update(payload).eq('id', ev.id);
+      if(isNew){
+        const { error } = await sb.from('club_events').insert(payload);
         if(error) throw error;
-        savedId = ev.id;
-      } else {
-        payload.created_by = cloud.session.user.id;
-        const { data, error } = await sb.from('club_events').insert(payload).select().single();
-        if(error) throw error;
-        savedId = data.id;
         await sb.from('club_event_rsvp').upsert(
-          { event_id: savedId, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: 'zugesagt' },
+          { event_id: eventId, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: 'zugesagt' },
           { onConflict: 'event_id,user_id' }
         );
+      } else {
+        const { error } = await sb.from('club_events').update(payload).eq('id', ev.id);
+        if(error) throw error;
       }
       await loadActiveClubData();
       renderClub();
       closeModal();
       showToast('Kegelabend gespeichert 🎳');
-    }catch(e){ showToast('Fehler beim Speichern: '+(e.message||'unbekannt')); }
+    }catch(e){
+      if(!isNetworkError(e)){
+        showToast('Fehler beim Speichern: '+(e.message||'unbekannt'));
+        return;
+      }
+      // Kein Netz: Änderung trotzdem lokal übernehmen und für später vormerken.
+      queueOfflineWrite({ type:'event_upsert', isNew, eventId, payload });
+      if(isNew){
+        cloud.events.push(Object.assign({ id: eventId }, payload));
+        const existingRsvp = cloud.rsvps.find(r=>r.event_id===eventId && r.user_id===cloud.session.user.id);
+        if(!existingRsvp) cloud.rsvps.push({ event_id: eventId, club_id: cloud.activeClubId, user_id: cloud.session.user.id, status: 'zugesagt' });
+        queueOfflineWrite({ type:'rsvp_upsert', eventId, clubId: cloud.activeClubId, userId: cloud.session.user.id, status: 'zugesagt' });
+      } else {
+        const idx = cloud.events.findIndex(e2=>e2.id===ev.id);
+        if(idx>=0) cloud.events[idx] = Object.assign({}, cloud.events[idx], payload);
+      }
+      renderClub();
+      closeModal();
+      showToast('📴 Offline gespeichert – wird synchronisiert, sobald wieder Internet da ist');
+    }
   }
 
   openModal(bodyHtml());
@@ -1922,13 +1991,15 @@ function openAdminGameModal(id){
       dauer: parseInt(document.getElementById('ag-dauer').value,10) || 10,
       tags: selectedTags
     };
+    const isNew = !game;
+    if(isNew){ payload.id = genUUID(); payload.created_by = cloud.session.user.id; }
+    const gameId = isNew ? payload.id : game.id;
     try{
-      if(game){
-        const { error } = await sb.from('games').update(payload).eq('id', game.id);
+      if(isNew){
+        const { error } = await sb.from('games').insert(payload);
         if(error) throw error;
       } else {
-        payload.created_by = cloud.session.user.id;
-        const { error } = await sb.from('games').insert(payload);
+        const { error } = await sb.from('games').update(payload).eq('id', game.id);
         if(error) throw error;
       }
       await refreshOfficialGames();
@@ -1936,7 +2007,19 @@ function openAdminGameModal(id){
       if(state.tab==='games') renderGames();
       closeModal();
       showToast('Gespeichert 🎳');
-    }catch(e){ showToast('Fehler: '+(e.message||'unbekannt')); }
+    }catch(e){
+      if(!isNetworkError(e)){ showToast('Fehler: '+(e.message||'unbekannt')); return; }
+      queueOfflineWrite({ type:'game_upsert', isNew, gameId, payload });
+      const local = { id: gameId, icon: payload.icon, name: payload.name, beschreibung: payload.beschreibung,
+        minSpieler: payload.min_spieler, maxSpieler: payload.max_spieler, dauer: payload.dauer, tags: payload.tags };
+      if(isNew){ officialGames.push(local); }
+      else { const idx = officialGames.findIndex(g=>g.id===gameId); if(idx>=0) officialGames[idx] = local; }
+      saveData('kegel_official_games_v1', officialGames);
+      renderAdmin();
+      if(state.tab==='games') renderGames();
+      closeModal();
+      showToast('📴 Offline gespeichert – wird synchronisiert, sobald wieder Internet da ist');
+    }
   });
   const delBtn = document.getElementById('ag-delete');
   if(delBtn) delBtn.addEventListener('click', async () => {
